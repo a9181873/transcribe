@@ -1,0 +1,16 @@
+# API 金鑰與憑證（絕對不能推上 GitHub）
+config.ini
+token.json
+credentials.json
+client_secret*.json
+*.env
+.env*
+
+# 輸出與暫存
+output/
+錄音檔/
+BK/
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store

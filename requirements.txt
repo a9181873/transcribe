@@ -1,0 +1,11 @@
+torch
+torchaudio
+mlx-whisper
+funasr
+modelscope
+google-auth
+google-auth-oauthlib
+google-api-python-client
+google-generativeai
+requests
+streamlit
