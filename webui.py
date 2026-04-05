@@ -2,6 +2,7 @@ import streamlit as st
 import subprocess
 import os
 import sys
+from pathlib import Path
 
 st.set_page_config(page_title="AI 語音識別轉錄系統", page_icon="🎤", layout="wide")
 
@@ -301,23 +302,112 @@ def build_common_args(output_dir):
             args.extend(["--gdrive-id", gdrive_id])
     return args
 
-def run_transcription(args):
+def run_transcription(args, input_path=None, output_dir=None):
+    """執行轉錄子程序，並在成功後於 UI 直接呈現摘要與逐字稿。"""
+    import re
     with st.spinner("正在執行轉換… 這可能需要幾分鐘的時間，請稍候。"):
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         output_area = st.empty()
         full_output = ""
+        current_progress = 0
+
         for line in iter(process.stdout.readline, ""):
             full_output += line
+
+            # ── 解析進度 ──
+            # 批次模式：處理第 X/Y 個檔案
+            batch_match = re.search(r'處理第\s*(\d+)/(\d+)', line)
+            if batch_match:
+                done, total = int(batch_match.group(1)), int(batch_match.group(2))
+                current_progress = done / total * 0.95
+            # 單檔模式：依階段關鍵字推進
+            elif '被支援' in line or '檔案格式' in line:
+                current_progress = max(current_progress, 0.10)
+            elif '正在執行語音轉錄' in line:
+                current_progress = max(current_progress, 0.20)
+            elif '逐字稿已儲存' in line:
+                current_progress = max(current_progress, 0.60)
+            elif '正在使用' in line and ('Gemini' in line or 'Ollama' in line):
+                current_progress = max(current_progress, 0.70)
+            elif '摘要已儲存' in line:
+                current_progress = max(current_progress, 0.90)
+            elif '程式執行完成' in line:
+                current_progress = 1.0
+
+            progress_bar.progress(min(current_progress, 1.0))
+            status_text.caption(f"⏳ 處理中... {int(current_progress * 100)}%")
+
             display_text = "".join(full_output.splitlines(True)[-50:])
             output_area.code(display_text, language="text")
 
         process.stdout.close()
         process.wait()
 
+        # 清除進度 UI
+        progress_bar.empty()
+        status_text.empty()
+        output_area.empty()
+
         if process.returncode == 0:
-            st.success("✅ 處理完成！請查看輸出目錄。")
+            st.success("✅ 處理完成！")
             st.balloons()
+
+            # ── 嘗試讀取並顯示摘要與逐字稿 ──
+            if input_path and output_dir:
+                stem = Path(input_path).stem
+                result_dir = Path(output_dir) / stem
+                summary_file = result_dir / f"{stem}_會議摘要.txt"
+                transcript_file = result_dir / f"{stem}_逐字稿.txt"
+
+                # ── 📂 檔案儲存位置 ──
+                st.info(f"📂 **檔案儲存位置：** `{result_dir.resolve()}`")
+
+                # ── 📋 會議摘要（預設展開）──
+                if summary_file.exists():
+                    summary_text = summary_file.read_text(encoding="utf-8")
+                    st.markdown("---")
+                    st.markdown("### 📋 會議摘要")
+                    st.markdown(summary_text)
+                    word_count = len(summary_text)
+                    st.caption(f"📊 摘要字數：{word_count:,} 字")
+
+                    col_s1, col_s2 = st.columns(2)
+                    with col_s1:
+                        st.download_button(
+                            label="⬇️ 下載摘要",
+                            data=summary_text,
+                            file_name=f"{stem}_會議摘要.txt",
+                            mime="text/plain",
+                            key="dl_summary"
+                        )
+                    with col_s2:
+                        with st.expander("📋 複製摘要文字", expanded=False):
+                            st.code(summary_text, language=None)
+
+                # ── 📝 逐字稿（預設摺疊）──
+                if transcript_file.exists():
+                    transcript_text = transcript_file.read_text(encoding="utf-8")
+                    with st.expander("📝 點此展開完整逐字稿", expanded=False):
+                        st.text_area(
+                            "逐字稿內容",
+                            value=transcript_text,
+                            height=400,
+                            disabled=True,
+                            label_visibility="collapsed"
+                        )
+                        t_count = len(transcript_text)
+                        st.caption(f"📊 逐字稿字數：{t_count:,} 字")
+
+                        st.download_button(
+                            label="⬇️ 下載逐字稿",
+                            data=transcript_text,
+                            file_name=f"{stem}_逐字稿.txt",
+                            mime="text/plain",
+                            key="dl_transcript"
+                        )
         else:
             st.error(f"❌ 處理失敗，返回碼：{process.returncode}")
 
@@ -344,7 +434,7 @@ with tab1:
             if final_input_path:
                 args.extend(["--file", final_input_path])
             args.extend(build_common_args(output_dir_1))
-            run_transcription(args)
+            run_transcription(args, input_path=final_input_path, output_dir=output_dir_1)
 
 with tab2:
     st.subheader("📁 資料夾批次處理")
