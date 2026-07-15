@@ -1,10 +1,17 @@
+import io
 import streamlit as st
 import subprocess
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 st.set_page_config(page_title="AI 語音識別轉錄系統", page_icon="🎤", layout="wide")
+
+# 公開部署預設只接受瀏覽器上傳，避免讓使用者任意讀寫伺服器檔案或探測內網。
+# 本機開發若需要舊有的絕對路徑／批次功能，可設定 MEETING_ALLOW_LOCAL_PATHS=1。
+ALLOW_LOCAL_PATHS = os.getenv("MEETING_ALLOW_LOCAL_PATHS", "0") == "1"
+ALLOW_CUSTOM_OLLAMA = os.getenv("MEETING_ALLOW_CUSTOM_OLLAMA", "0") == "1"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🌙 深色模式 CSS 注入
@@ -205,7 +212,7 @@ with st.sidebar:
     dark_toggle = st.toggle(
         "🌙 深色模式" if not st.session_state.dark_mode else "☀️ 亮色模式",
         value=st.session_state.dark_mode,
-        help="切換深色/亮色介面主題"
+        help="切換深色/亮色介面主題",
     )
     if dark_toggle != st.session_state.dark_mode:
         st.session_state.dark_mode = dark_toggle
@@ -215,17 +222,22 @@ with st.sidebar:
 
     # ── 語音辨識引擎 ──
     st.header("⚙️ 語音辨識 (ASR)")
-    engine = st.selectbox("核心引擎", ["mlx_whisper", "funasr"], index=0,
+    engine = st.selectbox(
+        "核心引擎",
+        ["funasr", "mlx_whisper"],
+        index=0,
         format_func=lambda x: {
             "mlx_whisper": "⚡ MLX Whisper (Apple Silicon 加速)",
-            "funasr": "🌏 FunASR (阿里巴巴中文語音)"
-        }[x])
+            "funasr": "🌏 FunASR (阿里巴巴中文語音)",
+        }[x],
+    )
 
     if engine == "mlx_whisper":
         model = "mlx-community/whisper-large-v3-turbo"
         st.info("⚡ 模型：`whisper-large-v3-turbo` — M4 極速首選")
     else:
-        model = st.selectbox("FunASR 模型", ["iic/SenseVoiceLarge"], index=0)
+        model = st.selectbox("FunASR 模型", ["iic/SenseVoiceSmall"], index=0)
+        st.info("🎙️ 逐句輸出：VAD + 標點 + CAM++ 說話人辨識")
 
     quantize = "int8"
     if engine == "funasr":
@@ -235,18 +247,21 @@ with st.sidebar:
 
     # ── 摘要引擎 ──
     st.header("🧠 摘要引擎")
-    summary_engine = st.selectbox("選擇摘要方式",
+    summary_engine = st.selectbox(
+        "選擇摘要方式",
         ["gemini", "ollama"],
         index=0,
         format_func=lambda x: {
             "gemini": "☁️ Gemini (雲端 — Google AI)",
-            "ollama": "🏠 Ollama (地端 — 完全離線)"
-        }[x])
+            "ollama": "🏠 Ollama (地端 — 完全離線)",
+        }[x],
+    )
 
     ollama_model = "qwen2.5:7b"
     ollama_url = "http://localhost:11434"
     if summary_engine == "ollama":
-        ollama_model = st.selectbox("地端模型",
+        ollama_model = st.selectbox(
+            "地端模型",
             ["qwen2.5:7b", "qwen2.5:14b", "qwen2.5:3b", "llama3.1:8b"],
             index=0,
             format_func=lambda x: {
@@ -254,20 +269,35 @@ with st.sidebar:
                 "qwen2.5:14b": "🔥 Qwen 2.5 14B (最佳品質、需較多記憶體)",
                 "qwen2.5:3b": "⚡ Qwen 2.5 3B (超快速、輕量)",
                 "llama3.1:8b": "🦙 Llama 3.1 8B (英文為主)",
-            }[x])
-        ollama_url = st.text_input("Ollama API 位址", value="http://localhost:11434")
+            }[x],
+        )
+        if ALLOW_CUSTOM_OLLAMA:
+            ollama_url = st.text_input(
+                "Ollama API 位址",
+                value=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            )
+        else:
+            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            st.caption(f"Ollama 位址：`{ollama_url}`（由伺服器環境變數設定）")
         st.info("💡 請確認 Ollama 已啟動 (`ollama serve`)")
 
     st.divider()
 
     # ── 摘要風格 ──
     st.header("📝 摘要風格")
-    prompt_style = st.selectbox("Prompt 風格",
-        ["detailed", "concise", "action", "interview", "brainstorm", "classic"], index=0,
+    prompt_style = st.selectbox(
+        "Prompt 風格",
+        ["detailed", "concise", "action", "interview", "brainstorm", "classic"],
+        index=0,
         format_func=lambda x: {
-            "detailed": "📋 詳細結構化", "concise": "⚡ 精簡重點", "action": "🎯 行動導向",
-            "interview": "🎤 訪談紀錄", "brainstorm": "💡 腦暴整理", "classic": "📝 經典簡易"
-        }[x])
+            "detailed": "📋 詳細結構化",
+            "concise": "⚡ 精簡重點",
+            "action": "🎯 行動導向",
+            "interview": "🎤 訪談紀錄",
+            "brainstorm": "💡 腦暴整理",
+            "classic": "📝 經典簡易",
+        }[x],
+    )
 
     st.divider()
 
@@ -283,6 +313,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 tab1, tab2, tab3 = st.tabs(["🎵 單一檔案處理", "📁 資料夾批次處理", "📖 模型資訊"])
+
 
 def build_common_args(output_dir):
     """組裝通用的命令列參數。"""
@@ -302,11 +333,58 @@ def build_common_args(output_dir):
             args.extend(["--gdrive-id", gdrive_id])
     return args
 
+
+def make_output_zip(result_dir):
+    """將該次處理產生的所有檔案打包，方便手機一次下載。"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(Path(result_dir).rglob("*")):
+            if path.is_file() and path.suffix != ".zip":
+                archive.write(path, arcname=path.relative_to(result_dir))
+    return buffer.getvalue()
+
+
+def render_artifact_downloads(result_dir, stem, key_prefix):
+    """呈現逐字稿、JSON、字幕、摘要與 ZIP 下載按鈕。"""
+    artifact_specs = [
+        (f"{stem}_會議摘要.txt", "⬇️ 下載會議摘要", "text/plain"),
+        (f"{stem}_逐字稿.txt", "⬇️ 下載逐字稿", "text/plain"),
+        (f"{stem}_逐句.json", "⬇️ 下載逐句 JSON", "application/json"),
+        (f"{stem}_字幕.srt", "⬇️ 下載 SRT 字幕", "application/x-subrip"),
+        (f"{stem}_字幕.vtt", "⬇️ 下載 VTT 字幕", "text/vtt"),
+    ]
+    columns = st.columns(3)
+    for index, (filename, label, mime) in enumerate(artifact_specs):
+        path = Path(result_dir) / filename
+        if path.exists():
+            with columns[index % len(columns)]:
+                st.download_button(
+                    label=label,
+                    data=path.read_bytes(),
+                    file_name=filename,
+                    mime=mime,
+                    key=f"{key_prefix}_{index}",
+                    use_container_width=True,
+                )
+    zip_data = make_output_zip(result_dir)
+    st.download_button(
+        label="📦 一次下載全部檔案（ZIP）",
+        data=zip_data,
+        file_name=f"{stem}_會議記錄.zip",
+        mime="application/zip",
+        key=f"{key_prefix}_zip",
+        use_container_width=True,
+    )
+
+
 def run_transcription(args, input_path=None, output_dir=None):
     """執行轉錄子程序，並在成功後於 UI 直接呈現摘要與逐字稿。"""
     import re
+
     with st.spinner("正在執行轉換… 這可能需要幾分鐘的時間，請稍候。"):
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        process = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -319,22 +397,22 @@ def run_transcription(args, input_path=None, output_dir=None):
 
             # ── 解析進度 ──
             # 批次模式：處理第 X/Y 個檔案
-            batch_match = re.search(r'處理第\s*(\d+)/(\d+)', line)
+            batch_match = re.search(r"處理第\s*(\d+)/(\d+)", line)
             if batch_match:
                 done, total = int(batch_match.group(1)), int(batch_match.group(2))
                 current_progress = done / total * 0.95
             # 單檔模式：依階段關鍵字推進
-            elif '被支援' in line or '檔案格式' in line:
+            elif "被支援" in line or "檔案格式" in line:
                 current_progress = max(current_progress, 0.10)
-            elif '正在執行語音轉錄' in line:
+            elif "正在執行語音轉錄" in line:
                 current_progress = max(current_progress, 0.20)
-            elif '逐字稿已儲存' in line:
+            elif "逐字稿已儲存" in line:
                 current_progress = max(current_progress, 0.60)
-            elif '正在使用' in line and ('Gemini' in line or 'Ollama' in line):
+            elif "正在使用" in line and ("Gemini" in line or "Ollama" in line):
                 current_progress = max(current_progress, 0.70)
-            elif '摘要已儲存' in line:
+            elif "摘要已儲存" in line:
                 current_progress = max(current_progress, 0.90)
-            elif '程式執行完成' in line:
+            elif "程式執行完成" in line:
                 current_progress = 1.0
 
             progress_bar.progress(min(current_progress, 1.0))
@@ -374,18 +452,8 @@ def run_transcription(args, input_path=None, output_dir=None):
                     word_count = len(summary_text)
                     st.caption(f"📊 摘要字數：{word_count:,} 字")
 
-                    col_s1, col_s2 = st.columns(2)
-                    with col_s1:
-                        st.download_button(
-                            label="⬇️ 下載摘要",
-                            data=summary_text,
-                            file_name=f"{stem}_會議摘要.txt",
-                            mime="text/plain",
-                            key="dl_summary"
-                        )
-                    with col_s2:
-                        with st.expander("📋 複製摘要文字", expanded=False):
-                            st.code(summary_text, language=None)
+                    with st.expander("📋 複製摘要文字", expanded=False):
+                        st.code(summary_text, language=None)
 
                 # ── 📝 逐字稿（預設摺疊）──
                 if transcript_file.exists():
@@ -396,32 +464,43 @@ def run_transcription(args, input_path=None, output_dir=None):
                             value=transcript_text,
                             height=400,
                             disabled=True,
-                            label_visibility="collapsed"
+                            label_visibility="collapsed",
                         )
                         t_count = len(transcript_text)
                         st.caption(f"📊 逐字稿字數：{t_count:,} 字")
 
-                        st.download_button(
-                            label="⬇️ 下載逐字稿",
-                            data=transcript_text,
-                            file_name=f"{stem}_逐字稿.txt",
-                            mime="text/plain",
-                            key="dl_transcript"
-                        )
+                st.markdown("### ⬇️ 下載處理結果")
+                render_artifact_downloads(result_dir, stem, "single_artifacts")
+            elif output_dir:
+                output_path = Path(output_dir)
+                if output_path.exists() and any(output_path.rglob("*")):
+                    st.markdown("### ⬇️ 下載批次處理結果")
+                    render_artifact_downloads(output_path, "batch", "batch_artifacts")
         else:
             st.error(f"❌ 處理失敗，返回碼：{process.returncode}")
 
+
 with tab1:
     st.subheader("🎵 單一檔案處理")
-    uploaded_file = st.file_uploader("👉 點擊並選擇音訊檔案", type=["wav", "mp3", "m4a", "mp4", "flac", "ogg", "aac"])
-    input_file = st.text_input("或者手動輸入音訊檔案的絕對路徑 (例如：/Users/jy/Downloads/test.m4a)")
-    output_dir_1 = st.text_input("輸出目錄", value="./output", key="out1")
+    uploaded_file = st.file_uploader(
+        "👉 點擊並選擇音訊檔案", type=["wav", "mp3", "m4a", "mp4", "flac", "ogg", "aac"]
+    )
+    input_file = ""
+    output_dir_1 = "./output"
+    if ALLOW_LOCAL_PATHS:
+        input_file = st.text_input(
+            "或者手動輸入音訊檔案的絕對路徑 (例如：/Users/jy/Downloads/test.m4a)"
+        )
+        output_dir_1 = st.text_input("輸出目錄", value="./output", key="out1")
+    else:
+        st.caption("公開上傳模式：檔案會儲存於伺服器的隔離輸出目錄，完成後可直接下載。")
 
     if st.button("🚀 開始轉錄 (單一檔案)", key="btn_single"):
         final_input_path = ""
         if uploaded_file is not None:
             os.makedirs(output_dir_1, exist_ok=True)
-            final_input_path = os.path.join(output_dir_1, uploaded_file.name)
+            safe_name = Path(uploaded_file.name).name
+            final_input_path = os.path.join(output_dir_1, safe_name)
             with open(final_input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
         elif input_file:
@@ -434,20 +513,34 @@ with tab1:
             if final_input_path:
                 args.extend(["--file", final_input_path])
             args.extend(build_common_args(output_dir_1))
-            run_transcription(args, input_path=final_input_path, output_dir=output_dir_1)
+            run_transcription(
+                args, input_path=final_input_path, output_dir=output_dir_1
+            )
 
 with tab2:
-    st.subheader("📁 資料夾批次處理")
-    input_folder = st.text_input("請輸入資料夾的絕對路徑 (例如：/Users/jy/Downloads)")
-    output_dir_2 = st.text_input("輸出目錄", value="./output", key="out2")
+    if not ALLOW_LOCAL_PATHS:
+        st.info("公開部署目前提供手機單檔上傳；伺服器資料夾批次功能已停用。")
+    else:
+        st.subheader("📁 資料夾批次處理")
+        input_folder = st.text_input(
+            "請輸入資料夾的絕對路徑 (例如：/Users/jy/Downloads)"
+        )
+        output_dir_2 = st.text_input("輸出目錄", value="./output", key="out2")
 
-    if st.button("🚀 開始批次轉錄 (資料夾)", key="btn_batch"):
-        if not input_folder:
-            st.error("請提供資料夾路徑。")
-        else:
-            args = [sys.executable, "transcribe_pro.py", "--mode", "batch", "--folder", input_folder]
-            args.extend(build_common_args(output_dir_2))
-            run_transcription(args)
+        if st.button("🚀 開始批次轉錄 (資料夾)", key="btn_batch"):
+            if not input_folder:
+                st.error("請提供資料夾路徑。")
+            else:
+                args = [
+                    sys.executable,
+                    "transcribe_pro.py",
+                    "--mode",
+                    "batch",
+                    "--folder",
+                    input_folder,
+                ]
+                args.extend(build_common_args(output_dir_2))
+                run_transcription(args, output_dir=output_dir_2)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 📖 模型資訊分頁
@@ -455,7 +548,9 @@ with tab2:
 
 with tab3:
     st.subheader("📖 系統使用的 AI 模型一覽")
-    st.markdown("以下列出本系統所有語音辨識 (ASR) 與文字摘要 (LLM) 模型的詳細資訊、推薦場景與評級。")
+    st.markdown(
+        "以下列出本系統所有語音辨識 (ASR) 與文字摘要 (LLM) 模型的詳細資訊、推薦場景與評級。"
+    )
 
     # ── 語音辨識模型 ──
     st.markdown("---")
@@ -494,19 +589,19 @@ with tab3:
     st.markdown("---")
 
     st.markdown("""
-#### 🌏 FunASR SenseVoice Large
+#### 🌏 FunASR SenseVoice Small
 | 項目 | 說明 |
 | :--- | :--- |
-| **模型 ID** | `iic/SenseVoiceLarge` |
+| **模型 ID** | `iic/SenseVoiceSmall` |
 | **開發者** | 阿里巴巴達摩院 (DAMO Academy) |
-| **參數量** | ~600M |
+| **參數量** | 以官方模型卡為準（Small 版本） |
 | **架構** | SenseVoice (基於 Paraformer 改進) |
 | **授權** | Apache 2.0 |
 | **資料來源** | [ModelScope 模型頁](https://modelscope.cn/models/iic/SenseVoiceSmall) ・ [GitHub](https://github.com/FunAudioLLM/SenseVoice) |
 
 **📝 模型介紹**
 
-阿里巴巴達摩院開發的多語言語音理解模型。除了語音轉文字，還具備情感識別、音訊事件偵測等功能。對中文（含普通話、粵語）的辨識精準度極高，特別擅長中文口語化表達。
+阿里巴巴達摩院開發的多語言語音理解模型。除了語音轉文字，還具備情感識別、音訊事件偵測等功能；本系統另接入 VAD、標點與 CAM++，輸出逐句時間戳及說話人標籤。
 
 **🎯 推薦場景**
 
@@ -530,10 +625,10 @@ with tab3:
 
     with col3:
         st.markdown("""
-#### ☁️ Google Gemini 2.5 系列 (雲端)
+#### ☁️ Google Gemini 系列 (雲端)
 | 項目 | 說明 |
 | :--- | :--- |
-| **模型 ID** | `gemini-2.5-pro` / `gemini-2.5-flash` |
+| **模型 ID** | 由 CLI／環境變數設定（預設 `gemini-3.5-flash`） |
 | **開發者** | Google DeepMind |
 | **類型** | 雲端 API (需金鑰) |
 | **授權** | Google API 服務條款 |
@@ -631,4 +726,6 @@ Meta AI 開發的開源大模型，在英文任務上表現強勁。支援 128K 
 
 
 st.markdown("---")
-st.markdown("💡 **提示：** 本介面會在背景執行 `transcribe_pro.py`，你可以在上方的終端區塊即時查看輸出進度。")
+st.markdown(
+    "💡 **提示：** 本介面會在背景執行 `transcribe_pro.py`，你可以在上方的終端區塊即時查看輸出進度。"
+)

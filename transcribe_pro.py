@@ -21,8 +21,10 @@ transcribe_pro.py — 會議錄音轉錄 & 結構化摘要工具 (優化整合�
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
@@ -47,10 +49,12 @@ log = logging.getLogger(__name__)
 # 🔧 延遲載入（Lazy Import）— 避免未安裝的套件阻塞啟動
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _try_import_mlx_whisper():
     """嘗試載入 mlx-whisper 套件。"""
     try:
         import mlx_whisper
+
         return mlx_whisper
     except ImportError:
         return None
@@ -60,6 +64,7 @@ def _try_import_funasr():
     """嘗試載入 FunASR 套件。"""
     try:
         from funasr import AutoModel
+
         return AutoModel
     except ImportError:
         return None
@@ -75,6 +80,7 @@ def _try_import_google_drive():
         from googleapiclient.discovery import build, Resource
         from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
         from googleapiclient.errors import HttpError
+
         return {
             "io": _io,
             "Credentials": Credentials,
@@ -95,7 +101,15 @@ def _try_import_google_drive():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # 支援的音訊副檔名（來自 V1.1 的格式驗證）
-SUPPORTED_EXTENSIONS: set[str] = {".wav", ".mp3", ".m4a", ".mp4", ".flac", ".ogg", ".aac"}
+SUPPORTED_EXTENSIONS: set[str] = {
+    ".wav",
+    ".mp3",
+    ".m4a",
+    ".mp4",
+    ".flac",
+    ".ogg",
+    ".aac",
+}
 
 # Google Drive API 權限範圍（來自原版）
 SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -106,17 +120,20 @@ class AppConfig:
     """集中管理所有應用程式設定。"""
 
     # ASR 引擎：mlx_whisper | funasr
-    asr_engine: str = "mlx_whisper"
+    # FunASR 是目前唯一能在本流程直接產生逐句說話人資訊的引擎。
+    asr_engine: str = "funasr"
 
     # Whisper 模型（mlx_whisper 生效）
     # ┌─────────────────────────────────────────────────────────────────────┐
     # │  M4 24GB RAM 唯一推薦（MLX 專用）：                                 │
     # │  mlx-community/whisper-large-v3-turbo  ⭐ 速度快、精準、低 RAM       │
     # └─────────────────────────────────────────────────────────────────────┘
-    whisper_model: str = "mlx-community/whisper-large-v3-turbo"  # ⭐ M4 唯一預設 (MLX專用)
+    whisper_model: str = (
+        "mlx-community/whisper-large-v3-turbo"  # ⭐ M4 唯一預設 (MLX專用)
+    )
 
     # FunASR 模型
-    funasr_model: str = "iic/SenseVoiceLarge"
+    funasr_model: str = "iic/SenseVoiceSmall"
 
     # FunASR 量化設定：none | int8 | fp16（來自 V2）
     funasr_quantize: str = "int8"
@@ -134,6 +151,7 @@ class AppConfig:
 
     # 摘要引擎：gemini | ollama
     summary_engine: str = "gemini"
+    gemini_model: str = "gemini-3.5-flash"
 
     # Ollama 地端模型設定
     ollama_model: str = "qwen2.5:7b"  # ⭐ 地端中文摘要首選
@@ -159,7 +177,9 @@ class AppConfig:
         try:
             if config_path.exists():
                 config.read(config_path, encoding="utf-8")
-                self.gemini_api_key = config.get("DEFAULT", "GEMINI_API_KEY", fallback="")
+                self.gemini_api_key = config.get(
+                    "DEFAULT", "GEMINI_API_KEY", fallback=""
+                )
         except Exception:
             pass
         if not self.gemini_api_key:
@@ -169,6 +189,7 @@ class AppConfig:
 # ═══════════════════════════════════════════════════════════════════════════════
 # ⏱️  通用工具
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def format_duration(seconds: float) -> str:
     """將秒數格式化為「X 分 Y 秒」。"""
@@ -200,8 +221,144 @@ def validate_audio_format(file_path: str) -> bool:
     if ext in SUPPORTED_EXTENSIONS:
         log.info("✅ 檔案格式 %s 被支援。", ext)
         return True
-    log.warning("⚠️ 檔案格式 %s 可能不被支援。支援格式: %s", ext, ", ".join(sorted(SUPPORTED_EXTENSIONS)))
+    log.warning(
+        "⚠️ 檔案格式 %s 可能不被支援。支援格式: %s",
+        ext,
+        ", ".join(sorted(SUPPORTED_EXTENSIONS)),
+    )
     return False
+
+
+def _clean_asr_text(text: str) -> str:
+    """清理 SenseVoice 的語言／情緒／事件控制標籤。"""
+    cleaned = text.strip()
+    try:
+        from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+        cleaned = rich_transcription_postprocess(cleaned)
+    except (ImportError, TypeError, AttributeError):
+        # 沒有 FunASR 時仍可處理 MLX／測試資料。
+        cleaned = re.sub(r"<\|[^>]+\|>", "", cleaned)
+    return cleaned.strip()
+
+
+def _speaker_key(value: object) -> Optional[str]:
+    """將不同引擎的說話人欄位統一成穩定字串。"""
+    if value is None or value == "":
+        return None
+    value_text = str(value)
+    return value_text if value_text.startswith("speaker_") else f"speaker_{value_text}"
+
+
+def _speaker_label(value: Optional[str]) -> str:
+    """將 speaker_0 轉成適合人閱讀的「說話人 A」。"""
+    if not value:
+        return "說話人未知"
+    suffix = value.removeprefix("speaker_")
+    if suffix.isdigit():
+        number = int(suffix)
+        if number < 26:
+            return f"說話人 {chr(ord('A') + number)}"
+    return value
+
+
+def _format_timestamp(seconds: Optional[float], separator: str = ",") -> str:
+    """格式化字幕時間；未知時間以 00:00:00.000 表示。"""
+    total_ms = max(0, int(round((seconds or 0.0) * 1000)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
+
+
+def _normalise_chunks(chunks: list[dict]) -> list[dict]:
+    """統一各 ASR 引擎的逐句結果格式。"""
+    normalised: list[dict] = []
+    for chunk in chunks:
+        start, end = chunk.get("timestamp", (None, None))
+        text = _clean_asr_text(str(chunk.get("text", "")))
+        if not text:
+            continue
+        normalised.append(
+            {
+                "start": float(start) if start is not None else None,
+                "end": float(end) if end is not None else None,
+                "speaker": _speaker_key(chunk.get("speaker")),
+                "text": text,
+            }
+        )
+    return normalised
+
+
+def write_transcription_artifacts(
+    output_dir: Path,
+    stem: str,
+    transcribed_text: str,
+    chunks: list[dict],
+) -> dict[str, Path]:
+    """輸出可閱讀逐字稿及可供其他系統使用的字幕／JSON 檔案。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    segments = _normalise_chunks(chunks)
+    if not segments and transcribed_text.strip():
+        segments = [
+            {
+                "start": None,
+                "end": None,
+                "speaker": None,
+                "text": _clean_asr_text(transcribed_text),
+            }
+        ]
+
+    transcript_lines = []
+    for segment in segments:
+        if segment["start"] is None:
+            time_text = "未知時間"
+        else:
+            time_text = f"{_format_timestamp(segment['start'], '.')}–{_format_timestamp(segment['end'], '.')}"
+        transcript_lines.append(
+            f"[{time_text}] {_speaker_label(segment['speaker'])}：{segment['text']}"
+        )
+    transcript_text = (
+        "\n\n".join(transcript_lines) if transcript_lines else transcribed_text.strip()
+    )
+
+    json_path = output_dir / f"{stem}_逐句.json"
+    json_path.write_text(
+        json.dumps({"version": 1, "segments": segments}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    srt_blocks = []
+    vtt_blocks = []
+    for index, segment in enumerate(segments, start=1):
+        if segment["start"] is None:
+            continue
+        speaker_text = f"{_speaker_label(segment['speaker'])}："
+        srt_blocks.append(
+            f"{index}\n{_format_timestamp(segment['start'])} --> {_format_timestamp(segment['end'])}\n{speaker_text}{segment['text']}"
+        )
+        vtt_blocks.append(
+            f"{_format_timestamp(segment['start'], '.')} --> {_format_timestamp(segment['end'], '.')}\n{speaker_text}{segment['text']}"
+        )
+
+    srt_path = output_dir / f"{stem}_字幕.srt"
+    srt_path.write_text(
+        "\n\n".join(srt_blocks) + ("\n" if srt_blocks else ""), encoding="utf-8"
+    )
+    vtt_path = output_dir / f"{stem}_字幕.vtt"
+    vtt_path.write_text(
+        "WEBVTT\n\n" + "\n\n".join(vtt_blocks) + ("\n" if vtt_blocks else ""),
+        encoding="utf-8",
+    )
+
+    transcript_path = output_dir / f"{stem}_逐字稿.txt"
+    transcript_path.write_text(transcript_text, encoding="utf-8")
+    return {
+        "transcript": transcript_path,
+        "json": json_path,
+        "srt": srt_path,
+        "vtt": vtt_path,
+    }
 
 
 def setup_torchaudio_backend() -> None:
@@ -218,12 +375,15 @@ def setup_torchaudio_backend() -> None:
             except RuntimeError:
                 log.warning("⚠️ 使用預設 backend，部分格式可能不支援。")
     else:
-        log.info("✅ Torchaudio (>= 2.1) backend auto setup. FFmpeg support is automatically used if available.")
+        log.info(
+            "✅ Torchaudio (>= 2.1) backend auto setup. FFmpeg support is automatically used if available."
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ☁️  Google Drive 功能模組（來自原版 & V1.1）
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class GoogleDriveManager:
     """封裝 Google Drive 的認證、下載、上傳功能。"""
@@ -242,12 +402,16 @@ class GoogleDriveManager:
         gd = self._gd
         creds = None
         try:
-            script_dir = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+            script_dir = (
+                Path(__file__).parent if "__file__" in globals() else Path.cwd()
+            )
             token_path = script_dir / "token.json"
             credentials_path = script_dir / "credentials.json"
 
             if token_path.exists():
-                creds = gd["Credentials"].from_authorized_user_file(str(token_path), SCOPES)
+                creds = gd["Credentials"].from_authorized_user_file(
+                    str(token_path), SCOPES
+                )
 
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
@@ -256,7 +420,9 @@ class GoogleDriveManager:
                     if not credentials_path.exists():
                         log.error("❌ 找不到 'credentials.json': %s", credentials_path)
                         return False
-                    flow = gd["InstalledAppFlow"].from_client_secrets_file(str(credentials_path), SCOPES)
+                    flow = gd["InstalledAppFlow"].from_client_secrets_file(
+                        str(credentials_path), SCOPES
+                    )
                     creds = flow.run_local_server(port=0)
                 token_path.write_text(creds.to_json(), encoding="utf-8")
 
@@ -287,7 +453,9 @@ class GoogleDriveManager:
             log.error("❌ 下載失敗: %s", e)
             return None
 
-    def upload(self, file_path: str, parent_folder_id: Optional[str] = None) -> Optional[str]:
+    def upload(
+        self, file_path: str, parent_folder_id: Optional[str] = None
+    ) -> Optional[str]:
         """上傳檔案至 Google Drive。"""
         if not self.service:
             log.error("❌ 尚未完成 Google Drive 驗證。")
@@ -298,9 +466,11 @@ class GoogleDriveManager:
             if parent_folder_id:
                 file_metadata["parents"] = [parent_folder_id]
             media = gd["MediaFileUpload"](file_path, resumable=True)
-            file = self.service.files().create(
-                body=file_metadata, media_body=media, fields="id"
-            ).execute()
+            file = (
+                self.service.files()
+                .create(body=file_metadata, media_body=media, fields="id")
+                .execute()
+            )
             fid = file.get("id")
             log.info("✅ '%s' 已上傳，ID: %s", Path(file_path).name, fid)
             return fid
@@ -312,6 +482,7 @@ class GoogleDriveManager:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🎙️  ASR 處理器（策略模式 + 各版本最佳實踐整合）
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class BaseAudioProcessor:
     """所有 ASR 處理器的基底類別。"""
@@ -341,30 +512,38 @@ class MlxWhisperProcessor(BaseAudioProcessor):
         with timer(f"[MlxWhisper] 轉錄 {Path(audio_path).name}"):
             log.info("🎵 [MlxWhisper] 處理: %s", Path(audio_path).name)
             log.info("🔄 正在執行語音轉錄...")
-            
+
             try:
                 # mlx_whisper 封裝了讀取與轉錄，直接傳入檔案路徑
-                result = self.mlx_whisper.transcribe(audio_path, path_or_hf_repo=self.model_name)
+                result = self.mlx_whisper.transcribe(
+                    audio_path, path_or_hf_repo=self.model_name
+                )
             except TypeError as e:
-                # Some repositories (like openai/whisper-large-v3) do not have the expected MLX weights format 
+                # Some repositories (like openai/whisper-large-v3) do not have the expected MLX weights format
                 # (they lack generation_config or specific MLX structure), causing model load to fail in MLX.
-                log.error("❌ MlxWhisper 載入模型失敗，該模型可能尚未轉換為 MLX 專用格式。")
+                log.error(
+                    "❌ MlxWhisper 載入模型失敗，該模型可能尚未轉換為 MLX 專用格式。"
+                )
                 log.warning("⚠️ 建議改用 `mlx-community/whisper-large-v3-turbo`。")
                 log.debug("詳細錯誤: %s", e)
-                return "轉錄失敗：模型不相容 MLX 引擎。", []
+                raise RuntimeError("MlxWhisper 模型不相容目前引擎。") from e
             except Exception as e:
                 log.error("❌ MlxWhisper 轉錄發生未知錯誤: %s", e)
-                return "轉錄失敗。", []
-            
+                raise RuntimeError("MlxWhisper 轉錄失敗。") from e
+
             transcribed_text = result.get("text", "").strip()
             chunks: list[dict] = []
             if "segments" in result:
                 for seg in result["segments"]:
-                    chunks.append({
-                        "timestamp": (seg.get("start", 0.0), seg.get("end", 0.0)),
-                        "text": seg.get("text", "").strip()
-                    })
+                    chunks.append(
+                        {
+                            "timestamp": (seg.get("start", 0.0), seg.get("end", 0.0)),
+                            "text": seg.get("text", "").strip(),
+                            "speaker": None,
+                        }
+                    )
         return transcribed_text, chunks
+
 
 class FunASRProcessor(BaseAudioProcessor):
     """基於阿里巴巴 FunASR 的中文語音識別處理器（整合 V2 量化 + V3.1 邏輯）。"""
@@ -379,15 +558,30 @@ class FunASRProcessor(BaseAudioProcessor):
         super().__init__(model_name)
 
         with timer("FunASR 模型初始化"):
-            # V3.1 的解包參數方式
-            model_kwargs: dict = {"model": model_name, "device": self.device}
+            # SenseVoiceSmall 的官方長音訊流程：VAD + 標點 + 說話人。
+            # FunASR 目前對 MPS 支援不完整；Apple Silicon 退回 CPU，避免啟動時直接失敗。
+            model_device = self.device if self.device in {"cuda", "cpu"} else "cpu"
+            model_kwargs: dict = {"model": model_name, "device": model_device}
+            is_sensevoice = "sensevoice" in model_name.lower()
+            if is_sensevoice:
+                model_kwargs.update(
+                    {
+                        "vad_model": "fsmn-vad",
+                        "vad_kwargs": {"max_single_segment_time": 30000},
+                        "punc_model": "ct-punc",
+                        "spk_model": "cam++",
+                    }
+                )
+                log.info("🎙️ [FunASR] 啟用 VAD、標點與 CAM++ 說話人辨識")
             if quantize and quantize.lower() != "none":
-                model_kwargs["quantize"] = quantize
-                log.info("⚙️ [FunASR] 量化: %s", quantize)
+                # FunASR 的 Python 推論不一定接受 quantize 參數；量化模型應改用 ONNX/GGUF。
+                log.info(
+                    "⚙️ [FunASR] 量化偏好: %s（Python 推論使用模型原生精度）", quantize
+                )
             else:
                 log.info("⚙️ [FunASR] 未啟用量化，使用預設精度。")
 
-            log.info("⚡️ [FunASR] 使用設備: %s", self.device.upper())
+            log.info("⚡️ [FunASR] 使用設備: %s", model_device.upper())
             self.model = AutoModel(**model_kwargs)
 
     def transcribe_audio(self, audio_path: str) -> Tuple[str, list]:
@@ -395,19 +589,42 @@ class FunASRProcessor(BaseAudioProcessor):
             log.info("🎵 [FunASR] 處理: %s", Path(audio_path).name)
             log.info("🔄 正在執行語音轉錄...")
             try:
-                result = self.model.generate(input=audio_path, batch_size_s=300)
+                result = self.model.generate(
+                    input=audio_path,
+                    cache={},
+                    language="auto",
+                    use_itn=True,
+                    batch_size_s=60,
+                    merge_vad=True,
+                    merge_length_s=15,
+                )
             except Exception as e:
                 log.error("❌ [FunASR] 轉錄失敗: %s", e)
-                return "FunASR 轉錄失敗。", []
+                raise RuntimeError("FunASR 轉錄失敗。") from e
 
-            text = result[0].get("text", "") if result else ""
+            text = _clean_asr_text(result[0].get("text", "") if result else "")
             chunks: list[dict] = []
             if result and "sentence_info" in result[0]:  # SenseVoice 格式
                 for s in result[0]["sentence_info"]:
-                    chunks.append({"timestamp": (s["start"] / 1000.0, s["end"] / 1000.0), "text": s["text"]})
+                    chunks.append(
+                        {
+                            "timestamp": (
+                                s.get("start", 0) / 1000.0,
+                                s.get("end", 0) / 1000.0,
+                            ),
+                            "speaker": s.get("spk"),
+                            "text": s.get("text", ""),
+                        }
+                    )
             elif result and "timestamp" in result[0]:  # Paraformer 格式
                 for ts in result[0]["timestamp"]:
-                    chunks.append({"timestamp": (ts[0] / 1000.0, ts[1] / 1000.0), "text": ts[2]})
+                    chunks.append(
+                        {
+                            "timestamp": (ts[0] / 1000.0, ts[1] / 1000.0),
+                            "speaker": None,
+                            "text": ts[2],
+                        }
+                    )
         return text, chunks
 
 
@@ -486,7 +703,6 @@ PROMPT_STYLES: dict[str, dict[str, str]] = {
 # Input Text
 {text}""",
     },
-
     # ── 2. 精簡重點版 ──
     "concise": {
         "name": "⚡ 精簡重點（Quick Summary）",
@@ -518,7 +734,6 @@ PROMPT_STYLES: dict[str, dict[str, str]] = {
 # Input Text
 {text}""",
     },
-
     # ── 3. 逐條行動導向版 ──
     "action": {
         "name": "🎯 行動導向（Action-Focused）",
@@ -554,7 +769,6 @@ PROMPT_STYLES: dict[str, dict[str, str]] = {
 # Input Text
 {text}""",
     },
-
     # ── 4. 訪談 / 一對一對話版 ──
     "interview": {
         "name": "🎤 訪談紀錄（Interview / 1-on-1）",
@@ -598,7 +812,6 @@ PROMPT_STYLES: dict[str, dict[str, str]] = {
 # Input Text
 {text}""",
     },
-
     # ── 5. 腦暴 / 創意發想版 ──
     "brainstorm": {
         "name": "💡 腦暴整理（Brainstorm Organizer）",
@@ -638,7 +851,6 @@ PROMPT_STYLES: dict[str, dict[str, str]] = {
 # Input Text
 {text}""",
     },
-
     # ── 6. 原版簡易 Prompt（來自原版 & V1.1 的經典格式）──
     "classic": {
         "name": "📝 經典簡易（Classic Simple）",
@@ -677,39 +889,35 @@ def get_summary_prompt(style: str, text: str) -> str:
 # 🤖 Gemini 文字摘要（整合 V3 最新模型 + 重試邏輯）
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def summarize_with_gemini(text: str, config: AppConfig) -> str:
-    """使用 Google Gemini API 進行結構化會議摘要（含重試與模型降級）。"""
+    """使用 Google GenAI SDK 進行結構化會議摘要。"""
     config.load_api_key_from_config()
     if not config.gemini_api_key:
         log.warning("⚠️ 未設定 GEMINI_API_KEY，跳過摘要。")
         return "摘要功能未啟用，因為缺少 API 金鑰。"
 
-    import google.generativeai as genai
-
-    genai.configure(api_key=config.gemini_api_key)
-
-    # 模型層級降級（最新 Gemini 2.5 系列 → 2.0 備用）
-    model = None
-    for model_name in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"):
-        try:
-            model = genai.GenerativeModel(model_name)
-            log.info("☁️ 使用雲端 Gemini 模型: %s", model_name)
-            break
-        except Exception:
-            continue
-
-    if model is None:
-        return "❌ 無法初始化 Gemini 模型。"
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        log.error("❌ 缺少 google-genai，請安裝 `pip install google-genai`。")
+        return "❌ 摘要功能缺少 google-genai 套件。"
 
     prompt = get_summary_prompt(config.prompt_style, text)
-    log.info("☁️ 正在使用 Gemini API 進行摘要分析...")
+    log.info("☁️ 正在使用 Gemini 模型 %s 進行摘要分析...", config.gemini_model)
 
     # 重試邏輯
     max_retries = 2
     for attempt in range(1, max_retries + 1):
         try:
             with timer("文字摘要 (Gemini)"):
-                response = model.generate_content(prompt)
+                client = genai.Client(api_key=config.gemini_api_key)
+                response = client.models.generate_content(
+                    model=config.gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.2),
+                )
                 return response.text
         except Exception as e:
             if attempt < max_retries:
@@ -741,8 +949,8 @@ def summarize_with_ollama(text: str, config: AppConfig) -> str:
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.3,      # 低溫度確保摘要穩定
-                        "num_predict": 4096,     # 足夠生成完整摘要
+                        "temperature": 0.3,  # 低溫度確保摘要穩定
+                        "num_predict": 4096,  # 足夠生成完整摘要
                         "top_p": 0.9,
                     },
                 },
@@ -752,7 +960,10 @@ def summarize_with_ollama(text: str, config: AppConfig) -> str:
             result = response.json()
             return result.get("response", "❌ Ollama 回應為空。").strip()
     except requests.ConnectionError:
-        log.error("❌ 無法連線至 Ollama 服務 (%s)。請確認 Ollama 已啟動。", config.ollama_base_url)
+        log.error(
+            "❌ 無法連線至 Ollama 服務 (%s)。請確認 Ollama 已啟動。",
+            config.ollama_base_url,
+        )
         return "❌ Ollama 服務未啟動或無法連線。請先執行 `ollama serve`。"
     except requests.Timeout:
         log.error("❌ Ollama 回應逾時。")
@@ -778,12 +989,13 @@ def summarize_text(text: str, config: AppConfig) -> str:
 # 🔄 核心處理流程（整合原版 Google Drive 流程 + V1.1 格式驗證）
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def process_audio_file(
     audio_path: str,
     audio_processor: BaseAudioProcessor,
     config: AppConfig,
     gdrive_manager: Optional[GoogleDriveManager] = None,
-) -> None:
+) -> dict[str, Path]:
     """處理單一音訊檔案：（可選下載）→ 格式驗證 → 轉錄 → 摘要 → 儲存（→ 可選上傳）。"""
     path = Path(audio_path)
     if not path.exists():
@@ -791,35 +1003,43 @@ def process_audio_file(
         return
 
     # 格式驗證（來自 V1.1）
-    validate_audio_format(audio_path)
+    if not validate_audio_format(audio_path):
+        raise ValueError(f"不支援的音訊格式: {Path(audio_path).suffix}")
 
-    transcribed_text, _ = audio_processor.transcribe_audio(audio_path)
+    transcribed_text, chunks = audio_processor.transcribe_audio(audio_path)
+    transcribed_text = _clean_asr_text(transcribed_text)
     summary = summarize_text(transcribed_text, config)
 
     # 建立輸出目錄
     output_dir = config.output_dir / path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    transcript_path = output_dir / f"{path.stem}_逐字稿.txt"
     summary_path = output_dir / f"{path.stem}_會議摘要.txt"
 
-    transcript_path.write_text(transcribed_text, encoding="utf-8")
-    log.info("💾 逐字稿已儲存: %s", transcript_path)
+    artifacts = write_transcription_artifacts(
+        output_dir, path.stem, transcribed_text, chunks
+    )
+    for artifact_path in artifacts.values():
+        log.info("💾 輸出已儲存: %s", artifact_path)
 
     summary_path.write_text(summary, encoding="utf-8")
     log.info("💾 摘要已儲存: %s", summary_path)
+    artifacts["summary"] = summary_path
 
     # Google Drive 上傳（來自原版）
     if gdrive_manager and gdrive_manager.service:
         log.info("📤 正在上傳結果至 Google Drive...")
-        gdrive_manager.upload(str(transcript_path), config.gdrive_upload_folder_id or None)
-        gdrive_manager.upload(str(summary_path), config.gdrive_upload_folder_id or None)
+        for artifact_path in artifacts.values():
+            gdrive_manager.upload(
+                str(artifact_path), config.gdrive_upload_folder_id or None
+            )
 
     # 列印結果
     print(f"\n{'=== 轉錄結果 ===':=^60}")
-    print(transcribed_text)
+    print(artifacts["transcript"].read_text(encoding="utf-8"))
     print(f"\n{'=== 會議摘要 ===':=^60}")
     print(summary)
+    return artifacts
 
 
 def process_gdrive_file(
@@ -836,7 +1056,9 @@ def process_gdrive_file(
     try:
         if not gdrive.download(file_id, str(temp_path)):
             return
-        process_audio_file(str(temp_path), audio_processor, config, gdrive_manager=gdrive)
+        process_audio_file(
+            str(temp_path), audio_processor, config, gdrive_manager=gdrive
+        )
     finally:
         temp_path.unlink(missing_ok=True)
         log.info("🗑️ 已清理暫存下載檔案。")
@@ -854,7 +1076,8 @@ def batch_process_folder(
         return
 
     audio_files: List[Path] = sorted(
-        f for f in folder.iterdir()
+        f
+        for f in folder.iterdir()
         if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
     )
 
@@ -884,7 +1107,11 @@ def batch_process_folder(
             log.error("❌ 處理 %s 時發生錯誤: %s", file_path.name, e)
             fail_count += 1
         finally:
-            log.info("📄 '%s' 處理完成，耗時: %s", file_path.name, format_duration(time.time() - file_start))
+            log.info(
+                "📄 '%s' 處理完成，耗時: %s",
+                file_path.name,
+                format_duration(time.time() - file_start),
+            )
 
     # 批次處理統計
     total_elapsed = time.time() - total_batch_start
@@ -958,6 +1185,7 @@ def interactive_mode(audio_processor: BaseAudioProcessor, config: AppConfig) -> 
 # 🚀 命令列介面 & 進入點
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def parse_args() -> AppConfig:
     """解析命令列參數並生成 AppConfig。"""
     parser = argparse.ArgumentParser(
@@ -973,46 +1201,86 @@ def parse_args() -> AppConfig:
         """,
     )
     # ASR 引擎
-    parser.add_argument("--engine", default="mlx_whisper",
-                        choices=list(_ENGINE_MAP.keys()),
-                        help="ASR 語音識別引擎 (預設 ⭐推薦: mlx_whisper)")
-    parser.add_argument("--model", default="mlx-community/whisper-large-v3-turbo",
-                        help="MLX Whisper 模型 (預設: mlx-community/whisper-large-v3-turbo)")
-    parser.add_argument("--funasr-model", default="iic/SenseVoiceLarge",
-                        help="FunASR 模型 (預設: iic/SenseVoiceLarge)")
-    parser.add_argument("--funasr-quantize", default="int8",
-                        help="FunASR 量化: none|int8|fp16 (預設: int8)")
+    parser.add_argument(
+        "--engine",
+        default="funasr",
+        choices=list(_ENGINE_MAP.keys()),
+        help="ASR 語音識別引擎 (預設 ⭐推薦: funasr)",
+    )
+    parser.add_argument(
+        "--model",
+        default="mlx-community/whisper-large-v3-turbo",
+        help="MLX Whisper 模型 (預設: mlx-community/whisper-large-v3-turbo)",
+    )
+    parser.add_argument(
+        "--funasr-model",
+        default="iic/SenseVoiceSmall",
+        help="FunASR 模型 (預設: iic/SenseVoiceSmall)",
+    )
+    parser.add_argument(
+        "--funasr-quantize",
+        default="int8",
+        help="FunASR 量化: none|int8|fp16 (預設: int8)",
+    )
 
     # 摘要引擎
-    parser.add_argument("--summary-engine", default="gemini",
-                        choices=["gemini", "ollama"],
-                        help="摘要引擎：gemini (雲端) 或 ollama (地端) (預設: gemini)")
-    parser.add_argument("--ollama-model", default="qwen2.5:7b",
-                        help="Ollama 地端模型 (預設 ⭐推薦: qwen2.5:7b)")
-    parser.add_argument("--ollama-url", default="http://localhost:11434",
-                        help="Ollama API 位址 (預設: http://localhost:11434)")
+    parser.add_argument(
+        "--summary-engine",
+        default="gemini",
+        choices=["gemini", "ollama"],
+        help="摘要引擎：gemini (雲端) 或 ollama (地端) (預設: gemini)",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        default="gemini-3.5-flash",
+        help="Gemini 模型 ID (預設: gemini-3.5-flash)",
+    )
+    parser.add_argument(
+        "--ollama-model",
+        default="qwen2.5:7b",
+        help="Ollama 地端模型 (預設 ⭐推薦: qwen2.5:7b)",
+    )
+    parser.add_argument(
+        "--ollama-url",
+        default="http://localhost:11434",
+        help="Ollama API 位址 (預設: http://localhost:11434)",
+    )
 
     # 處理模式
-    parser.add_argument("--mode", default="batch",
-                        choices=["single", "batch", "interactive"],
-                        help="處理模式 (預設: batch)")
+    parser.add_argument(
+        "--mode",
+        default="batch",
+        choices=["single", "batch", "interactive"],
+        help="處理模式 (預設: batch)",
+    )
     parser.add_argument("--file", default="", help="單檔模式的音訊檔案路徑")
-    parser.add_argument("--folder", default="/Users/jy/Downloads",
-                        help="批次模式的資料夾路徑")
-    parser.add_argument("--output", default="./output", help="輸出目錄 (預設: ./output)")
+    parser.add_argument(
+        "--folder", default="/Users/jy/Downloads", help="批次模式的資料夾路徑"
+    )
+    parser.add_argument(
+        "--output", default="./output", help="輸出目錄 (預設: ./output)"
+    )
 
     # 摘要
-    parser.add_argument("--prompt-style", default="detailed",
-                        choices=list(PROMPT_STYLES.keys()),
-                        help="摘要 Prompt 風格 (預設: detailed)")
-    parser.add_argument("--list-prompts", action="store_true",
-                        help="列出所有可用的摘要 Prompt 風格")
+    parser.add_argument(
+        "--prompt-style",
+        default="detailed",
+        choices=list(PROMPT_STYLES.keys()),
+        help="摘要 Prompt 風格 (預設: detailed)",
+    )
+    parser.add_argument(
+        "--list-prompts", action="store_true", help="列出所有可用的摘要 Prompt 風格"
+    )
 
     # Google Drive
-    parser.add_argument("--enable-gdrive", action="store_true",
-                        help="啟用 Google Drive 整合功能")
-    parser.add_argument("--gdrive-id", default="",
-                        help="Google Drive 檔案 ID（搭配 --enable-gdrive 使用）")
+    parser.add_argument(
+        "--enable-gdrive", action="store_true", help="啟用 Google Drive 整合功能"
+    )
+    parser.add_argument(
+        "--gdrive-id",
+        default="",
+        help="Google Drive 檔案 ID（搭配 --enable-gdrive 使用）",
+    )
 
     args = parser.parse_args()
 
@@ -1029,6 +1297,7 @@ def parse_args() -> AppConfig:
         output_dir=Path(args.output),
         prompt_style=args.prompt_style,
         summary_engine=args.summary_engine,
+        gemini_model=args.gemini_model,
         ollama_model=args.ollama_model,
         ollama_base_url=args.ollama_url,
         funasr_model=args.funasr_model,
@@ -1054,7 +1323,12 @@ def main() -> None:
     else:
         log.info("   模型: %s", config.whisper_model)
     log.info("   模式: %s", config.mode)
-    log.info("   摘要引擎: %s", "☁️ Gemini (雲端)" if config.summary_engine == "gemini" else f"🏠 Ollama (地端: {config.ollama_model})")
+    log.info(
+        "   摘要引擎: %s",
+        "☁️ Gemini (雲端)"
+        if config.summary_engine == "gemini"
+        else f"🏠 Ollama (地端: {config.ollama_model})",
+    )
     log.info("   摘要風格: %s", PROMPT_STYLES[config.prompt_style]["name"])
     log.info("   輸出目錄: %s", config.output_dir)
     if config.enable_gdrive:

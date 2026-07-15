@@ -1,0 +1,9 @@
+# Add this block to the existing OCI /home/ubuntu/stack/Caddyfile.
+meeting.{$DOMAIN} {
+    tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin-key.pem
+    reverse_proxy meeting:8501 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

@@ -1,0 +1,29 @@
+name: meeting
+
+services:
+  meeting:
+    build: .
+    container_name: meeting
+    restart: unless-stopped
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: ${STREAMLIT_SERVER_MAX_UPLOAD_SIZE:-512}
+      MEETING_ALLOW_LOCAL_PATHS: ${MEETING_ALLOW_LOCAL_PATHS:-0}
+      MEETING_ALLOW_CUSTOM_OLLAMA: ${MEETING_ALLOW_CUSTOM_OLLAMA:-0}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://localhost:11434}
+    volumes:
+      - meeting_models:/models
+      - meeting_output:/app/output
+    expose:
+      - "8501"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: proxy
+
+volumes:
+  meeting_models:
+  meeting_output:

@@ -1,0 +1,11 @@
+.git
+.gitignore
+.DS_Store
+__pycache__
+*.pyc
+config.ini
+*.json
+output
+錄音檔
+BK
+.vscode

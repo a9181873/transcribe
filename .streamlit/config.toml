@@ -1,0 +1,9 @@
+[server]
+headless = true
+# 保留 CORS 預設值，並與 XSRF 保護相容。
+enableCORS = true
+enableXsrfProtection = true
+maxUploadSize = 512
+
+[browser]
+gatherUsageStats = false
