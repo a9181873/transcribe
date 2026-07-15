@@ -1,6 +1,7 @@
 # OCI Linux CPU image. MLX is intentionally excluded because it targets Apple Silicon.
-torch>=2.5,<3
-torchaudio>=2.5,<3
+# Pin below 2.11: newer ARM wheels may pull a full CUDA 13 stack into a CPU VM.
+torch==2.10.0
+torchaudio==2.10.0
 funasr>=1.3,<2
 modelscope>=1.25,<2
 google-genai>=1,<2
