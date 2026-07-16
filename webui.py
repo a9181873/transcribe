@@ -28,180 +28,219 @@ ALLOW_CUSTOM_OLLAMA = os.getenv("MEETING_ALLOW_CUSTOM_OLLAMA", "0") == "1"
 if "dark_mode" not in st.session_state:
     st.session_state.dark_mode = False
 
-DARK_CSS = """
+CLASSIC_CSS = """
 <style>
-/* ── 全域深色主題 ── */
+/* 經典編輯風格：海軍藍、暖白、低飽和青綠與少量金色 */
 [data-testid="stAppViewContainer"],
 [data-testid="stApp"] {
-    background: linear-gradient(160deg, #0f0f1a 0%, #1a1a2e 40%, #16213e 100%) !important;
-    color: #e0e0e0 !important;
+    background: var(--meeting-page) !important;
+    color: var(--meeting-text) !important;
 }
 
-/* 頂部 Header */
 [data-testid="stHeader"] {
-    background: rgba(15, 15, 26, 0.85) !important;
-    backdrop-filter: blur(12px) !important;
-    border-bottom: 1px solid rgba(99, 102, 241, 0.15) !important;
+    background: color-mix(in srgb, var(--meeting-page) 94%, transparent) !important;
+    border-bottom: 1px solid var(--meeting-border) !important;
+    backdrop-filter: blur(10px) !important;
 }
 
-/* 側邊欄 */
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #0d0d1a 0%, #1a1a2e 100%) !important;
-    border-right: 1px solid rgba(99, 102, 241, 0.12) !important;
-}
-[data-testid="stSidebar"] * {
-    color: #c8c8d8 !important;
+    background: var(--meeting-sidebar) !important;
+    border-right: 1px solid var(--meeting-border) !important;
 }
 
-/* 所有文字 */
-.stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3,
-label, .stTextInput label, .stSelectbox label, .stCheckbox label {
-    color: #e0e0e0 !important;
+.stMarkdown, .stMarkdown p, .stMarkdown li,
+label, [data-testid="stCaptionContainer"] {
+    color: var(--meeting-text) !important;
 }
 
-/* 標題漸層色 */
+h1, h2, h3, h4 {
+    color: var(--meeting-heading) !important;
+    letter-spacing: -0.015em !important;
+}
+
 h1 {
-    background: linear-gradient(135deg, #818cf8, #c084fc, #f472b6) !important;
-    -webkit-background-clip: text !important;
-    -webkit-text-fill-color: transparent !important;
-    background-clip: text !important;
+    font-weight: 720 !important;
 }
 
-/* 輸入框 & 選單 */
-.stTextInput > div > div,
-.stSelectbox > div > div,
+a {
+    color: var(--meeting-accent) !important;
+}
+
+.stButton > button,
+.stDownloadButton > button {
+    background: var(--meeting-accent) !important;
+    color: var(--meeting-on-accent) !important;
+    border: 1px solid var(--meeting-accent) !important;
+    border-radius: 7px !important;
+    font-weight: 650 !important;
+    box-shadow: 0 2px 8px var(--meeting-shadow) !important;
+    transition: background-color 160ms ease, border-color 160ms ease !important;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    background: var(--meeting-accent-hover) !important;
+    border-color: var(--meeting-accent-hover) !important;
+}
+
+.stTextInput input,
+.stTextArea textarea,
+.stNumberInput input,
 [data-baseweb="select"] > div {
-    background-color: rgba(30, 30, 50, 0.8) !important;
-    border: 1px solid rgba(99, 102, 241, 0.25) !important;
-    color: #e0e0e0 !important;
-    border-radius: 8px !important;
-    transition: border-color 0.3s ease, box-shadow 0.3s ease !important;
-}
-.stTextInput > div > div:focus-within,
-.stSelectbox > div > div:focus-within {
-    border-color: rgba(129, 140, 248, 0.6) !important;
-    box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.15) !important;
-}
-input, textarea {
-    color: #e0e0e0 !important;
+    background: var(--meeting-surface) !important;
+    color: var(--meeting-text) !important;
+    border-color: var(--meeting-border) !important;
+    border-radius: 7px !important;
 }
 
-/* 按鈕 */
-.stButton > button {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    padding: 0.55rem 1.3rem !important;
-    transition: all 0.3s ease !important;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25) !important;
-}
-.stButton > button:hover {
-    background: linear-gradient(135deg, #818cf8, #a78bfa) !important;
-    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4) !important;
-    transform: translateY(-1px) !important;
+.stTextInput input:focus,
+.stTextArea textarea:focus,
+.stNumberInput input:focus,
+[data-baseweb="select"] > div:focus-within {
+    border-color: var(--meeting-accent) !important;
+    box-shadow: 0 0 0 2px var(--meeting-focus) !important;
 }
 
-/* Tabs */
+[data-baseweb="popover"],
+[role="listbox"],
+[role="option"] {
+    background: var(--meeting-surface) !important;
+    color: var(--meeting-text) !important;
+}
+
+[role="option"]:hover {
+    background: var(--meeting-sidebar) !important;
+}
+
 .stTabs [data-baseweb="tab-list"] {
-    background: rgba(20, 20, 35, 0.6) !important;
-    border-radius: 10px !important;
-    padding: 4px !important;
-    gap: 4px !important;
+    gap: 1.25rem !important;
+    border-bottom: 1px solid var(--meeting-border) !important;
 }
+
 .stTabs [data-baseweb="tab"] {
     background: transparent !important;
-    color: #9ca3af !important;
-    border-radius: 8px !important;
-    transition: all 0.3s ease !important;
+    color: var(--meeting-muted) !important;
+    border-radius: 0 !important;
 }
+
 .stTabs [aria-selected="true"] {
-    background: rgba(99, 102, 241, 0.15) !important;
-    color: #818cf8 !important;
+    color: var(--meeting-heading) !important;
 }
+
 .stTabs [data-baseweb="tab-highlight"] {
-    background-color: #6366f1 !important;
+    background: var(--meeting-gold) !important;
 }
 
-/* 代碼區塊 */
-.stCodeBlock, pre, code {
-    background-color: rgba(10, 10, 20, 0.7) !important;
-    border: 1px solid rgba(99, 102, 241, 0.12) !important;
-    border-radius: 8px !important;
-    color: #a5f3fc !important;
-}
-
-/* 成功/錯誤提示 */
-.stAlert {
-    border-radius: 10px !important;
-    backdrop-filter: blur(8px) !important;
-}
-
-/* 檔案上傳區 */
 [data-testid="stFileUploader"] {
-    border: 2px dashed rgba(99, 102, 241, 0.3) !important;
-    border-radius: 12px !important;
-    background: rgba(20, 20, 35, 0.4) !important;
-    transition: border-color 0.3s ease !important;
-}
-[data-testid="stFileUploader"]:hover {
-    border-color: rgba(129, 140, 248, 0.5) !important;
+    background: var(--meeting-surface) !important;
+    border: 1.5px dashed var(--meeting-accent) !important;
+    border-radius: 9px !important;
 }
 
-/* Checkbox */
-.stCheckbox label span {
-    color: #c8c8d8 !important;
+.stAlert {
+    background: var(--meeting-surface) !important;
+    color: var(--meeting-text) !important;
+    border: 1px solid var(--meeting-border) !important;
+    border-left: 4px solid var(--meeting-accent) !important;
+    border-radius: 7px !important;
 }
 
-/* Divider */
+table {
+    border-color: var(--meeting-border) !important;
+}
+
+thead tr {
+    background: var(--meeting-sidebar) !important;
+}
+
+th, td {
+    border-color: var(--meeting-border) !important;
+}
+
+pre, code, .stCodeBlock {
+    background: var(--meeting-code) !important;
+    color: var(--meeting-code-text) !important;
+    border-color: var(--meeting-border) !important;
+    border-radius: 6px !important;
+}
+
 hr {
-    border-color: rgba(99, 102, 241, 0.15) !important;
+    border-color: var(--meeting-border) !important;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: rgba(15, 15, 26, 0.5); }
+[data-testid="stProgress"] > div > div > div > div {
+    background: var(--meeting-accent) !important;
+}
+
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: var(--meeting-page); }
 ::-webkit-scrollbar-thumb {
-    background: rgba(99, 102, 241, 0.3);
-    border-radius: 3px;
+    background: var(--meeting-border-strong);
+    border-radius: 8px;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.5); }
 </style>
 """
 
-LIGHT_CSS = """
+LIGHT_PALETTE_CSS = """
 <style>
-/* ── 亮色主題微調 ── */
-h1 {
-    background: linear-gradient(135deg, #4f46e5, #7c3aed, #db2777) !important;
-    -webkit-background-clip: text !important;
-    -webkit-text-fill-color: transparent !important;
-    background-clip: text !important;
-}
-.stButton > button {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    padding: 0.55rem 1.3rem !important;
-    transition: all 0.3s ease !important;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2) !important;
-}
-.stButton > button:hover {
-    background: linear-gradient(135deg, #818cf8, #a78bfa) !important;
-    box-shadow: 0 6px 20px rgba(99, 102, 241, 0.35) !important;
-    transform: translateY(-1px) !important;
+:root {
+    --primary-color: #286F6B;
+    --background-color: #F7F3EA;
+    --secondary-background-color: #EEE7DA;
+    --text-color: #1D2A33;
+    --meeting-page: #F7F3EA;
+    --meeting-surface: #FFFCF6;
+    --meeting-sidebar: #EEE7DA;
+    --meeting-text: #1D2A33;
+    --meeting-muted: #5B6770;
+    --meeting-heading: #17324D;
+    --meeting-accent: #286F6B;
+    --meeting-accent-hover: #1F5B58;
+    --meeting-on-accent: #FFFFFF;
+    --meeting-gold: #B78B3E;
+    --meeting-border: #D8CDBB;
+    --meeting-border-strong: #A99E8D;
+    --meeting-code: #EDE7DC;
+    --meeting-code-text: #17324D;
+    --meeting-focus: rgba(40, 111, 107, 0.18);
+    --meeting-shadow: rgba(23, 50, 77, 0.14);
 }
 </style>
 """
 
-# 注入 CSS
-if st.session_state.dark_mode:
-    st.markdown(DARK_CSS, unsafe_allow_html=True)
-else:
-    st.markdown(LIGHT_CSS, unsafe_allow_html=True)
+DARK_PALETTE_CSS = """
+<style>
+:root {
+    --primary-color: #6CAAA5;
+    --background-color: #111820;
+    --secondary-background-color: #18232D;
+    --text-color: #E9E4DA;
+    --meeting-page: #111820;
+    --meeting-surface: #18232D;
+    --meeting-sidebar: #0D151C;
+    --meeting-text: #E9E4DA;
+    --meeting-muted: #AEB7BC;
+    --meeting-heading: #D7E4EC;
+    --meeting-accent: #6CAAA5;
+    --meeting-accent-hover: #83BDB8;
+    --meeting-on-accent: #0D1F21;
+    --meeting-gold: #D2AE6D;
+    --meeting-border: #344653;
+    --meeting-border-strong: #657985;
+    --meeting-code: #0D151C;
+    --meeting-code-text: #B9D8D4;
+    --meeting-focus: rgba(108, 170, 165, 0.22);
+    --meeting-shadow: rgba(0, 0, 0, 0.28);
+}
+</style>
+"""
+
+# 注入色票與共用元件樣式
+st.markdown(
+    DARK_PALETTE_CSS if st.session_state.dark_mode else LIGHT_PALETTE_CSS,
+    unsafe_allow_html=True,
+)
+st.markdown(CLASSIC_CSS, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 📐 主介面
@@ -274,17 +313,7 @@ with st.sidebar:
         st.caption(f"實際摘要模型：`{gemini_model}`")
         st.info("適合正式會議紀錄、決議與待辦整理；逐字稿會送至 Google Gemini API。")
     else:
-        ollama_model = st.selectbox(
-            "地端模型",
-            ["qwen2.5:7b", "qwen2.5:14b", "qwen2.5:3b", "llama3.1:8b"],
-            index=0,
-            format_func=lambda x: {
-                "qwen2.5:7b": "⭐ Qwen 2.5 7B (中文首選、速度與品質均衡)",
-                "qwen2.5:14b": "🔥 Qwen 2.5 14B (最佳品質、需較多記憶體)",
-                "qwen2.5:3b": "⚡ Qwen 2.5 3B (超快速、輕量)",
-                "llama3.1:8b": "🦙 Llama 3.1 8B (英文為主)",
-            }[x],
-        )
+        st.caption("固定地端模型：`qwen2.5:7b`（中文摘要品質、速度與資源占用較均衡）")
         if ALLOW_CUSTOM_OLLAMA:
             ollama_url = st.text_input(
                 "Ollama API 位址",
@@ -641,10 +670,10 @@ with tab3:
 
     with col3:
         st.markdown("""
-#### ☁️ Google Gemini 系列 (雲端)
+#### ☁️ Gemini 3.5 Flash（雲端）
 | 項目 | 說明 |
 | :--- | :--- |
-| **模型 ID** | 由 CLI／環境變數設定（預設 `gemini-3.5-flash`） |
+| **模型 ID** | `gemini-3.5-flash` |
 | **開發者** | Google DeepMind |
 | **類型** | 雲端 API (需金鑰) |
 | **授權** | Google API 服務條款 |
@@ -652,7 +681,7 @@ with tab3:
 
 **📝 模型介紹**
 
-Google 最新一代的 Gemini 2.5 多模態大型語言模型。具備超強的長文理解能力（支援百萬 Token 上下文窗口），中英文摘要品質在雲端服務中名列前茅。Pro 版智慧最高，Flash 版速度最快。
+目前介面使用 Gemini 3.5 Flash，適合將長篇逐字稿整理成結論、決議、待辦、風險與未決問題。
 
 **🎯 推薦場景**
 
@@ -664,67 +693,31 @@ Google 最新一代的 Gemini 2.5 多模態大型語言模型。具備超強的�
 | 離線/隱私需求 | ❌ 不適用 |
 | 免費額度 | ⭐⭐⭐ (有限) |
 
-> ☁️ **雲端首選！** 品質最高，但需要網路連線與 API 金鑰。有每日免費額度限制。
+> ☁️ **雲端預設。** 需要網路連線與 API 金鑰；逐字稿會送至 Google Gemini API。
         """)
 
     with col4:
         st.markdown("""
-#### 🏠 Qwen 2.5 系列 (地端 Ollama)
+#### 🏠 Qwen 2.5 7B（地端 Ollama）
 | 項目 | 說明 |
 | :--- | :--- |
-| **模型 ID** | `qwen2.5:7b` / `qwen2.5:14b` / `qwen2.5:3b` |
-| **開發者** | 阿里雲通義千問團隊 |
-| **參數量** | 3B / 7B / 14B 可選 |
-| **類型** | 地端執行 (完全離線) |
-| **授權** | Apache 2.0 |
-| **資料來源** | [HuggingFace](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) ・ [GitHub](https://github.com/QwenLM/Qwen2.5) ・ [Ollama](https://ollama.com/library/qwen2.5) |
+| **固定模型 ID** | `qwen2.5:7b` |
+| **選擇理由** | 中文摘要、速度與資源占用均衡 |
+| **類型** | 地端執行（完全離線） |
+| **模型安裝** | 只需 `ollama pull qwen2.5:7b` |
+| **資料來源** | [HuggingFace](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) ・ [Ollama](https://ollama.com/library/qwen2.5) |
 
-**📝 模型介紹**
-
-阿里雲通義千問團隊開發的第 2.5 代開源大型語言模型。在中文理解、摘要、邏輯推理等任務上表現卓越，是目前開源中文 LLM 的第一梯隊。透過 Ollama 在 Mac 本地執行，完全不依賴網路，資料隱私有保障。
-
-**🎯 推薦場景**
+**🎯 適用場景**
 
 | 場景 | 推薦程度 |
 | :--- | :---: |
 | 中文會議摘要 | ⭐⭐⭐⭐⭐ |
-| 離線/隱私需求 | ⭐⭐⭐⭐⭐ |
-| 免費使用 | ⭐⭐⭐⭐⭐ |
-| 英文內容 | ⭐⭐⭐⭐ |
-| 超長篇內容 (>10k字) | ⭐⭐⭐ |
-| M4 Mac 執行速度 | ⭐⭐⭐⭐ |
+| 離線／隱私需求 | ⭐⭐⭐⭐⭐ |
+| Mac M4 24GB 日常使用 | ⭐⭐⭐⭐ |
+| 中英文混合內容 | ⭐⭐⭐⭐ |
 
-> 🏠 **地端首選！** 完全免費、完全離線。7B 版在 M4 Mac 上速度飛快，品質逼近雲端模型。
+> 介面不再列出其他 Ollama 模型，避免誤裝多個模型占用磁碟；只保留 `qwen2.5:7b`。
         """)
-
-    st.markdown("---")
-    st.markdown("""
-#### 🦙 Llama 3.1 8B (地端 Ollama)
-| 項目 | 說明 |
-| :--- | :--- |
-| **模型 ID** | `llama3.1:8b` |
-| **開發者** | Meta AI |
-| **參數量** | ~8B |
-| **類型** | 地端執行 (完全離線) |
-| **授權** | Llama 3.1 Community License |
-| **資料來源** | [HuggingFace](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) ・ [Ollama](https://ollama.com/library/llama3.1) |
-
-**📝 模型介紹**
-
-Meta AI 開發的開源大模型，在英文任務上表現強勁。支援 128K Token 上下文窗口，適合處理超長英文內容。中文能力也有一定水準，但不如 Qwen 2.5 系列。
-
-**🎯 推薦場景**
-
-| 場景 | 推薦程度 |
-| :--- | :---: |
-| 英文會議摘要 | ⭐⭐⭐⭐⭐ |
-| 中文會議摘要 | ⭐⭐⭐ |
-| 離線/隱私需求 | ⭐⭐⭐⭐⭐ |
-| 超長篇英文內容 | ⭐⭐⭐⭐⭐ |
-| M4 Mac 執行速度 | ⭐⭐⭐⭐ |
-
-> 🦙 **英文場景備選。** 如果您的錄音以英文為主，Llama 3.1 是不錯的替代方案。
-    """)
 
     # ── 總覽比較表 ──
     st.markdown("---")
@@ -734,10 +727,8 @@ Meta AI 開發的開源大模型，在英文任務上表現強勁。支援 128K 
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Whisper Large V3 Turbo (MLX)** | ASR | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ✅ | 🥇 唯一首選 |
 | **FunASR SenseVoice** | ASR | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ✅ | 🥈 中文專精 |
-| **Gemini 2.5 Pro/Flash** | LLM 摘要 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ❌ | 🥇 雲端首選 |
-| **Qwen 2.5 7B** | LLM 摘要 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ✅ | 🥇 地端首選 |
-| **Qwen 2.5 14B** | LLM 摘要 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ✅ | 🥈 地端高品質 |
-| **Llama 3.1 8B** | LLM 摘要 | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ✅ | 英文場景 |
+| **Gemini 3.5 Flash** | LLM 摘要 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ❌ | 🥇 雲端首選 |
+| **Qwen 2.5 7B** | LLM 摘要 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ✅ | 🥇 唯一地端選項 |
     """)
 
 
