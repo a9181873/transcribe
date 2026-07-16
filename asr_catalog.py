@@ -32,7 +32,7 @@ ASR_PROFILES = {
         hardware="OCI ARM、Linux／Windows CPU、Apple Silicon",
         memory="低～中；適合與其他日常服務共用主機",
         accuracy="中文辨識穩定，速度優先",
-        note="支援 VAD、標點與 CAM++ 說話人辨識；目前 OCI 預設。",
+        note="支援 VAD 與標點；OCI 穩定模式停用 CAM++ 說話人辨識。",
         quantize="int8",
     ),
     "mlx_whisper_turbo": ASRProfile(

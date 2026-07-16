@@ -122,7 +122,7 @@ class AppConfig:
     """集中管理所有應用程式設定。"""
 
     # ASR 引擎：mlx_whisper | funasr
-    # FunASR 是目前唯一能在本流程直接產生逐句說話人資訊的引擎。
+    # FunASR 可在相容模型中產生說話人資訊；SenseVoice 穩定模式不啟用 CAM++。
     asr_engine: str = "funasr"
 
     # Whisper 模型（mlx_whisper 生效）
@@ -547,6 +547,40 @@ class MlxWhisperProcessor(BaseAudioProcessor):
         return transcribed_text, chunks
 
 
+def _prefer_modelscope_cache(model_name: str) -> str:
+    """Use a persisted ModelScope snapshot when it is already available."""
+    model_path = Path(model_name)
+    if model_path.exists():
+        return model_name
+
+    cache_root = os.getenv("MODELSCOPE_CACHE")
+    if not cache_root or "/" not in model_name:
+        return model_name
+
+    root = Path(cache_root)
+    organization, repository = model_name.split("/", 1)
+    candidates = (
+        root / "models" / model_name.replace("/", "--") / "snapshots" / "master",
+        root / "models" / organization / repository,
+        root / organization / repository,
+    )
+    for snapshot in candidates:
+        if (snapshot / "configuration.json").exists() or (
+            snapshot / "config.yaml"
+        ).exists():
+            return str(snapshot)
+
+    # ModelScope has changed its on-disk layout between releases. Let its own
+    # resolver locate a cached copy without allowing network access.
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        return snapshot_download(model_name, local_files_only=True)
+    except Exception:
+        pass
+    return model_name
+
+
 class FunASRProcessor(BaseAudioProcessor):
     """基於阿里巴巴 FunASR 的中文語音識別處理器（整合 V2 量化 + V3.1 邏輯）。"""
 
@@ -560,21 +594,30 @@ class FunASRProcessor(BaseAudioProcessor):
         super().__init__(model_name)
 
         with timer("FunASR 模型初始化"):
-            # SenseVoiceSmall 的官方長音訊流程：VAD + 標點 + 說話人。
+            # SenseVoiceSmall 長音訊穩定流程：VAD + 標點，不啟用 CAM++。
             # FunASR 目前對 MPS 支援不完整；Apple Silicon 退回 CPU，避免啟動時直接失敗。
             model_device = self.device if self.device in {"cuda", "cpu"} else "cpu"
-            model_kwargs: dict = {"model": model_name, "device": model_device}
+            model_kwargs: dict = {
+                "model": _prefer_modelscope_cache(model_name),
+                "device": model_device,
+                "disable_update": True,
+            }
             is_sensevoice = "sensevoice" in model_name.lower()
             if is_sensevoice:
                 model_kwargs.update(
                     {
-                        "vad_model": "fsmn-vad",
+                        "vad_model": _prefer_modelscope_cache(
+                            "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+                        ),
                         "vad_kwargs": {"max_single_segment_time": 30000},
-                        "punc_model": "ct-punc",
-                        "spk_model": "cam++",
+                        "punc_model": _prefer_modelscope_cache(
+                            "iic/punc_ct-transformer_cn-en-common-vocab471067-large"
+                        ),
                     }
                 )
-                log.info("🎙️ [FunASR] 啟用 VAD、標點與 CAM++ 說話人辨識")
+                # FunASR 1.3.14 can emit None speaker timestamps for SenseVoice,
+                # which crashes CAM++ speaker assignment after ASR succeeds.
+                log.info("🎙️ [FunASR] 啟用 VAD 與標點（穩定模式）")
             if quantize and quantize.lower() != "none":
                 # FunASR 的 Python 推論不一定接受 quantize 參數；量化模型應改用 ONNX/GGUF。
                 log.info(
@@ -620,11 +663,14 @@ class FunASRProcessor(BaseAudioProcessor):
                     )
             elif result and "timestamp" in result[0]:  # Paraformer 格式
                 for ts in result[0]["timestamp"]:
+                    if not isinstance(ts, (list, tuple)) or len(ts) < 2:
+                        continue
                     chunks.append(
                         {
                             "timestamp": (ts[0] / 1000.0, ts[1] / 1000.0),
                             "speaker": None,
-                            "text": ts[2],
+                            # Word timestamps are normally [start_ms, end_ms].
+                            "text": _clean_asr_text(ts[2]) if len(ts) > 2 else "",
                         }
                     )
         return text, chunks
@@ -929,7 +975,10 @@ def summarize_with_gemini(text: str, config: AppConfig) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             with timer("文字摘要 (Gemini)"):
-                client = genai.Client(api_key=config.gemini_api_key)
+                client = genai.Client(
+                    api_key=config.gemini_api_key,
+                    http_options=types.HttpOptions(timeout=120_000),
+                )
                 response = client.models.generate_content(
                     model=config.gemini_model,
                     contents=prompt,
@@ -1013,11 +1062,10 @@ def process_audio_file(
     config: AppConfig,
     gdrive_manager: Optional[GoogleDriveManager] = None,
 ) -> dict[str, Path]:
-    """處理單一音訊檔案：（可選下載）→ 格式驗證 → 轉錄 → 摘要 → 儲存（→ 可選上傳）。"""
+    """處理單一音訊檔案，並優先保存 ASR 產物後再進行摘要。"""
     path = Path(audio_path)
     if not path.exists():
-        log.error("❌ 找不到檔案: %s", audio_path)
-        return
+        raise FileNotFoundError(f"找不到檔案: {audio_path}")
 
     # 格式驗證（來自 V1.1）
     if not validate_audio_format(audio_path):
@@ -1025,20 +1073,24 @@ def process_audio_file(
 
     transcribed_text, chunks = audio_processor.transcribe_audio(audio_path)
     transcribed_text = _clean_asr_text(transcribed_text)
-    summary = summarize_text(transcribed_text, config)
 
-    # 建立輸出目錄
+    # ASR 一完成就先保存逐字稿。即使摘要 API 逾時或失敗，使用者仍可
+    # 取回逐字稿、逐句 JSON 與字幕。
     output_dir = config.output_dir / path.stem
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    summary_path = output_dir / f"{path.stem}_會議摘要.txt"
-
     artifacts = write_transcription_artifacts(
         output_dir, path.stem, transcribed_text, chunks
     )
     for artifact_path in artifacts.values():
         log.info("💾 輸出已儲存: %s", artifact_path)
 
+    try:
+        summary = summarize_text(transcribed_text, config)
+    except Exception as exc:
+        log.exception("❌ 摘要發生未預期錯誤，逐字稿已保留。")
+        summary = f"生成摘要時發生錯誤: {exc}"
+
+    summary_path = output_dir / f"{path.stem}_會議摘要.txt"
     summary_path.write_text(summary, encoding="utf-8")
     log.info("💾 摘要已儲存: %s", summary_path)
     artifacts["summary"] = summary_path

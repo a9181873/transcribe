@@ -1,10 +1,14 @@
 import io
-import streamlit as st
-import subprocess
 import os
+import re
+import secrets
+import subprocess
 import sys
+import threading
 import zipfile
 from pathlib import Path
+
+import streamlit as st
 
 from asr_catalog import (
     ASR_PROFILES,
@@ -20,6 +24,18 @@ st.set_page_config(page_title="AI 語音識別轉錄系統", page_icon="🎤", l
 # 本機開發若需要舊有的絕對路徑／批次功能，可設定 MEETING_ALLOW_LOCAL_PATHS=1。
 ALLOW_LOCAL_PATHS = os.getenv("MEETING_ALLOW_LOCAL_PATHS", "0") == "1"
 ALLOW_CUSTOM_OLLAMA = os.getenv("MEETING_ALLOW_CUSTOM_OLLAMA", "0") == "1"
+
+PUBLIC_JOB_ROOT = Path("./output/jobs")
+JOB_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
+
+
+@st.cache_resource
+def _get_transcription_lock():
+    """建立跨 Streamlit 工作階段共用的單一轉錄鎖。"""
+    return threading.Lock()
+
+
+TRANSCRIPTION_LOCK = _get_transcription_lock()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🌙 深色模式 CSS 注入
@@ -346,10 +362,14 @@ with st.sidebar:
 
     # ── 雲端設定 ──
     st.header("☁️ 雲端設定")
-    enable_gdrive = st.checkbox("啟用 Google Drive 下載/上傳", value=False)
+    enable_gdrive = False
     gdrive_id = ""
-    if enable_gdrive:
-        gdrive_id = st.text_input("Google Drive 檔案 ID (選填)")
+    if ALLOW_LOCAL_PATHS:
+        enable_gdrive = st.checkbox("啟用 Google Drive 下載/上傳", value=False)
+        if enable_gdrive:
+            gdrive_id = st.text_input("Google Drive 檔案 ID (選填)")
+    else:
+        st.caption("OCI 公開上傳模式目前停用 Google Drive，請直接上傳音訊檔。")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 📄 主內容區
@@ -422,108 +442,179 @@ def render_artifact_downloads(result_dir, stem, key_prefix):
     )
 
 
-def run_transcription(args, input_path=None, output_dir=None):
-    """執行轉錄子程序，並在成功後於 UI 直接呈現摘要與逐字稿。"""
-    import re
+def _tail_output(full_output, line_count=80):
+    """只保留最後幾行子程序輸出，讓錯誤可讀且不塞滿頁面。"""
+    return "".join(full_output.splitlines(True)[-line_count:]).strip()
 
-    with st.spinner("正在執行轉換… 這可能需要幾分鐘的時間，請稍候。"):
-        process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+
+def _stop_process(process):
+    """盡力停止仍在執行的轉錄子程序。"""
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _current_job_token():
+    raw_token = st.query_params.get("job", "")
+    if isinstance(raw_token, list):
+        raw_token = raw_token[0] if raw_token else ""
+    token = str(raw_token)
+    return token if JOB_TOKEN_RE.fullmatch(token) else ""
+
+
+def _public_job_dir(token):
+    if not JOB_TOKEN_RE.fullmatch(token):
+        return None
+    base = PUBLIC_JOB_ROOT.resolve()
+    job_dir = (base / token).resolve()
+    return job_dir if job_dir.parent == base else None
+
+
+def _find_public_job_result(token):
+    job_dir = _public_job_dir(token)
+    if job_dir is None or not job_dir.is_dir():
+        return None
+    transcripts = sorted(
+        job_dir.glob("*/*_逐字稿.txt"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return transcripts[0].parent if transcripts else None
+
+
+def render_single_result(result_dir, key_prefix):
+    """呈現一筆完成或部分完成的單檔結果。"""
+    result_dir = Path(result_dir)
+    stem = result_dir.name
+    summary_file = result_dir / f"{stem}_會議摘要.txt"
+    transcript_file = result_dir / f"{stem}_逐字稿.txt"
+
+    if not transcript_file.exists():
+        return False
+
+    st.success("✅ 逐字稿已完成，可直接查看或下載。")
+    if summary_file.exists():
+        summary_text = summary_file.read_text(encoding="utf-8")
+        st.markdown("---")
+        st.markdown("### 📋 會議摘要")
+        st.markdown(summary_text)
+        st.caption(f"📊 摘要字數：{len(summary_text):,} 字")
+        with st.expander("📋 複製摘要文字", expanded=False):
+            st.code(summary_text, language=None)
+    else:
+        st.info("逐字稿已保存；會議摘要仍在處理中，稍後重新整理即可。")
+
+    transcript_text = transcript_file.read_text(encoding="utf-8")
+    with st.expander("📝 點此展開完整逐字稿", expanded=True):
+        st.text_area(
+            "逐字稿內容",
+            value=transcript_text,
+            height=400,
+            disabled=True,
+            label_visibility="collapsed",
+            key=f"{key_prefix}_transcript_text",
         )
+        st.caption(f"📊 逐字稿字數：{len(transcript_text):,} 字")
 
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        output_area = st.empty()
-        full_output = ""
-        current_progress = 0
+    st.markdown("### ⬇️ 下載處理結果")
+    render_artifact_downloads(result_dir, stem, key_prefix)
+    return True
 
-        for line in iter(process.stdout.readline, ""):
-            full_output += line
 
-            # ── 解析進度 ──
-            # 批次模式：處理第 X/Y 個檔案
-            batch_match = re.search(r"處理第\s*(\d+)/(\d+)", line)
-            if batch_match:
-                done, total = int(batch_match.group(1)), int(batch_match.group(2))
-                current_progress = done / total * 0.95
-            # 單檔模式：依階段關鍵字推進
-            elif "被支援" in line or "檔案格式" in line:
-                current_progress = max(current_progress, 0.10)
-            elif "正在執行語音轉錄" in line:
-                current_progress = max(current_progress, 0.20)
-            elif "逐字稿已儲存" in line:
-                current_progress = max(current_progress, 0.60)
-            elif "正在使用" in line and ("Gemini" in line or "Ollama" in line):
-                current_progress = max(current_progress, 0.70)
-            elif "摘要已儲存" in line:
-                current_progress = max(current_progress, 0.90)
-            elif "程式執行完成" in line:
-                current_progress = 1.0
+def run_transcription(args, input_path=None, output_dir=None):
+    """執行轉錄子程序；成功必須以實際產物為準，失敗則保留錯誤。"""
+    if not TRANSCRIPTION_LOCK.acquire(blocking=False):
+        st.warning("目前已有一個檔案正在轉錄，請等它完成後再試。")
+        return None
 
-            progress_bar.progress(min(current_progress, 1.0))
-            status_text.caption(f"⏳ 處理中... {int(current_progress * 100)}%")
+    process = None
+    try:
+        with st.spinner("正在執行轉換… 這可能需要幾分鐘，請勿關閉此頁。"):
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
 
-            display_text = "".join(full_output.splitlines(True)[-50:])
-            output_area.code(display_text, language="text")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            output_area = st.empty()
+            full_output = ""
+            current_progress = 0
 
-        process.stdout.close()
-        process.wait()
+            try:
+                for line in iter(process.stdout.readline, ""):
+                    full_output += line
 
-        # 清除進度 UI
-        progress_bar.empty()
-        status_text.empty()
-        output_area.empty()
+                    batch_match = re.search(r"處理第\s*(\d+)/(\d+)", line)
+                    if batch_match:
+                        done, total = int(batch_match.group(1)), int(batch_match.group(2))
+                        current_progress = done / total * 0.95
+                    elif "被支援" in line or "檔案格式" in line:
+                        current_progress = max(current_progress, 0.10)
+                    elif "正在執行語音轉錄" in line:
+                        current_progress = max(current_progress, 0.20)
+                    elif "輸出已儲存" in line:
+                        current_progress = max(current_progress, 0.60)
+                    elif "正在使用" in line and ("Gemini" in line or "Ollama" in line):
+                        current_progress = max(current_progress, 0.70)
+                    elif "摘要已儲存" in line:
+                        current_progress = max(current_progress, 0.90)
+                    elif "程式執行完成" in line:
+                        current_progress = 1.0
 
-        if process.returncode == 0:
-            st.success("✅ 處理完成！")
-            st.balloons()
+                    progress_bar.progress(min(current_progress, 1.0))
+                    status_text.caption(
+                        f"⏳ 處理中... {int(current_progress * 100)}%"
+                    )
+                    output_area.code(_tail_output(full_output, 50), language="text")
 
-            # ── 嘗試讀取並顯示摘要與逐字稿 ──
+                process.stdout.close()
+                process.wait()
+            except BaseException:
+                _stop_process(process)
+                raise
+
+            progress_bar.empty()
+            status_text.empty()
+
+            result_dir = None
             if input_path and output_dir:
                 stem = Path(input_path).stem
                 result_dir = Path(output_dir) / stem
-                summary_file = result_dir / f"{stem}_會議摘要.txt"
                 transcript_file = result_dir / f"{stem}_逐字稿.txt"
+                if process.returncode == 0 and not transcript_file.exists():
+                    st.error("❌ 程式雖已結束，但沒有產生逐字稿。")
+                    output_area.code(
+                        _tail_output(full_output) or "子程序沒有輸出。",
+                        language="text",
+                    )
+                    return None
 
-                # ── 📂 檔案儲存位置 ──
-                st.info(f"📂 **檔案儲存位置：** `{result_dir.resolve()}`")
+            if process.returncode != 0:
+                st.error(f"❌ 處理失敗，返回碼：{process.returncode}")
+                output_area.code(
+                    _tail_output(full_output) or "子程序沒有輸出。",
+                    language="text",
+                )
+                return None
 
-                # ── 📋 會議摘要（預設展開）──
-                if summary_file.exists():
-                    summary_text = summary_file.read_text(encoding="utf-8")
-                    st.markdown("---")
-                    st.markdown("### 📋 會議摘要")
-                    st.markdown(summary_text)
-                    word_count = len(summary_text)
-                    st.caption(f"📊 摘要字數：{word_count:,} 字")
-
-                    with st.expander("📋 複製摘要文字", expanded=False):
-                        st.code(summary_text, language=None)
-
-                # ── 📝 逐字稿（預設摺疊）──
-                if transcript_file.exists():
-                    transcript_text = transcript_file.read_text(encoding="utf-8")
-                    with st.expander("📝 點此展開完整逐字稿", expanded=False):
-                        st.text_area(
-                            "逐字稿內容",
-                            value=transcript_text,
-                            height=400,
-                            disabled=True,
-                            label_visibility="collapsed",
-                        )
-                        t_count = len(transcript_text)
-                        st.caption(f"📊 逐字稿字數：{t_count:,} 字")
-
-                st.markdown("### ⬇️ 下載處理結果")
-                render_artifact_downloads(result_dir, stem, "single_artifacts")
-            elif output_dir:
-                output_path = Path(output_dir)
-                if output_path.exists() and any(output_path.rglob("*")):
-                    st.markdown("### ⬇️ 下載批次處理結果")
-                    render_artifact_downloads(output_path, "batch", "batch_artifacts")
-        else:
-            st.error(f"❌ 處理失敗，返回碼：{process.returncode}")
-
+            output_area.empty()
+            st.balloons()
+            return result_dir if result_dir is not None else Path(output_dir)
+    except OSError as exc:
+        st.error(f"❌ 無法啟動轉錄程式：{exc}")
+        return None
+    finally:
+        _stop_process(process)
+        TRANSCRIPTION_LOCK.release()
 
 with tab1:
     st.subheader("🎵 單一檔案處理")
@@ -538,16 +629,30 @@ with tab1:
         )
         output_dir_1 = st.text_input("輸出目錄", value="./output", key="out1")
     else:
-        st.caption("公開上傳模式：檔案會儲存於伺服器的隔離輸出目錄，完成後可直接下載。")
+        st.caption(
+            "公開上傳模式：每次處理都有專屬結果連結，重新整理後仍可取回。"
+        )
 
-    if st.button("🚀 開始轉錄 (單一檔案)", key="btn_single"):
+    start_single = st.button("🚀 開始轉錄 (單一檔案)", key="btn_single")
+    if start_single:
         final_input_path = ""
+        run_output_dir = output_dir_1
+        job_token = ""
+
         if uploaded_file is not None:
-            os.makedirs(output_dir_1, exist_ok=True)
             safe_name = Path(uploaded_file.name).name
-            final_input_path = os.path.join(output_dir_1, safe_name)
-            with open(final_input_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+            if ALLOW_LOCAL_PATHS:
+                os.makedirs(run_output_dir, exist_ok=True)
+            else:
+                job_token = secrets.token_urlsafe(18)
+                job_dir = _public_job_dir(job_token)
+                job_dir.mkdir(parents=True, exist_ok=False)
+                run_output_dir = str(job_dir)
+                st.query_params["job"] = job_token
+
+            final_input_path = os.path.join(run_output_dir, safe_name)
+            with open(final_input_path, "wb") as file_handle:
+                file_handle.write(uploaded_file.getbuffer())
         elif input_file:
             final_input_path = input_file
 
@@ -557,10 +662,34 @@ with tab1:
             args = [sys.executable, "transcribe_pro.py", "--mode", "single"]
             if final_input_path:
                 args.extend(["--file", final_input_path])
-            args.extend(build_common_args(output_dir_1))
-            run_transcription(
-                args, input_path=final_input_path, output_dir=output_dir_1
-            )
+            args.extend(build_common_args(run_output_dir))
+            try:
+                completed_result = run_transcription(
+                    args,
+                    input_path=final_input_path,
+                    output_dir=run_output_dir,
+                )
+            finally:
+                if job_token and final_input_path:
+                    Path(final_input_path).unlink(missing_ok=True)
+
+            if completed_result is not None:
+                st.session_state["latest_single_result"] = str(completed_result)
+
+    if ALLOW_LOCAL_PATHS:
+        latest_result = st.session_state.get("latest_single_result", "")
+        if latest_result and Path(latest_result).is_dir():
+            render_single_result(Path(latest_result), "latest_local")
+    else:
+        current_token = _current_job_token()
+        if current_token:
+            public_result = _find_public_job_result(current_token)
+            if public_result is not None:
+                render_single_result(public_result, f"job_{current_token}")
+            else:
+                current_job_dir = _public_job_dir(current_token)
+                if current_job_dir is not None and current_job_dir.is_dir():
+                    st.info("這次工作仍在處理中；稍後重新整理此頁即可取回結果。")
 
 with tab2:
     if not ALLOW_LOCAL_PATHS:
@@ -585,7 +714,12 @@ with tab2:
                     input_folder,
                 ]
                 args.extend(build_common_args(output_dir_2))
-                run_transcription(args, output_dir=output_dir_2)
+                batch_result = run_transcription(args, output_dir=output_dir_2)
+                if batch_result is not None:
+                    st.markdown("### ⬇️ 下載批次處理結果")
+                    render_artifact_downloads(
+                        batch_result, "batch", "batch_artifacts"
+                    )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 📖 模型資訊分頁
@@ -646,7 +780,7 @@ with tab3:
 
 **📝 模型介紹**
 
-阿里巴巴達摩院開發的多語言語音理解模型。除了語音轉文字，還具備情感識別、音訊事件偵測等功能；本系統另接入 VAD、標點與 CAM++，輸出逐句時間戳及說話人標籤。
+阿里巴巴達摩院開發的多語言語音理解模型。除了語音轉文字，還具備情感識別、音訊事件偵測等功能；本系統另接入 VAD 與標點。OCI 穩定模式停用 CAM++，因此目前不輸出說話人標籤。
 
 **🎯 推薦場景**
 
