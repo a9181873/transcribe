@@ -6,6 +6,14 @@ import sys
 import zipfile
 from pathlib import Path
 
+from asr_catalog import (
+    ASR_PROFILES,
+    available_profile_keys,
+    default_profile_key,
+    detect_runtime_family,
+    runtime_label,
+)
+
 st.set_page_config(page_title="AI 語音識別轉錄系統", page_icon="🎤", layout="wide")
 
 # 公開部署預設只接受瀏覽器上傳，避免讓使用者任意讀寫伺服器檔案或探測內網。
@@ -220,28 +228,30 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 語音辨識引擎 ──
-    st.header("⚙️ 語音辨識 (ASR)")
-    engine = st.selectbox(
-        "核心引擎",
-        ["funasr", "mlx_whisper"],
-        index=0,
-        format_func=lambda x: {
-            "mlx_whisper": "⚡ MLX Whisper (Apple Silicon 加速)",
-            "funasr": "🌏 FunASR (阿里巴巴中文語音)",
-        }[x],
+    # ── 語音辨識模型 ──
+    st.header("⚙️ 語音辨識模型")
+    runtime_family = detect_runtime_family()
+    profile_keys = available_profile_keys(runtime_family)
+    selected_profile_key = st.selectbox(
+        "選擇模型",
+        profile_keys,
+        index=profile_keys.index(default_profile_key(runtime_family)),
+        format_func=lambda key: ASR_PROFILES[key].label,
+        help="選項依執行程式的主機能力顯示；從 Mac 瀏覽 OCI 網站時仍使用 OCI 模型。",
     )
+    selected_profile = ASR_PROFILES[selected_profile_key]
+    engine = selected_profile.engine
+    model = selected_profile.model
+    quantize = selected_profile.quantize
 
-    if engine == "mlx_whisper":
-        model = "mlx-community/whisper-large-v3-turbo"
-        st.info("⚡ 模型：`whisper-large-v3-turbo` — M4 極速首選")
-    else:
-        model = st.selectbox("FunASR 模型", ["iic/SenseVoiceSmall"], index=0)
-        st.info("🎙️ 逐句輸出：VAD + 標點 + CAM++ 說話人辨識")
-
-    quantize = "int8"
-    if engine == "funasr":
-        quantize = st.selectbox("量化 (Quantize)", ["none", "int8", "fp16"], index=1)
+    st.caption(f"執行環境：{runtime_label(runtime_family)}")
+    st.info(
+        f"**適用場景：** {selected_profile.scenario}\n\n"
+        f"**適用硬體：** {selected_profile.hardware}\n\n"
+        f"**記憶體：** {selected_profile.memory}\n\n"
+        f"**辨識取向：** {selected_profile.accuracy}"
+    )
+    st.caption(selected_profile.note)
 
     st.divider()
 
@@ -252,14 +262,18 @@ with st.sidebar:
         ["gemini", "ollama"],
         index=0,
         format_func=lambda x: {
-            "gemini": "☁️ Gemini (雲端 — Google AI)",
+            "gemini": "☁️ Gemini 3.5 Flash（雲端・目前預設）",
             "ollama": "🏠 Ollama (地端 — 完全離線)",
         }[x],
     )
 
+    gemini_model = "gemini-3.5-flash"
     ollama_model = "qwen2.5:7b"
     ollama_url = "http://localhost:11434"
-    if summary_engine == "ollama":
+    if summary_engine == "gemini":
+        st.caption(f"實際摘要模型：`{gemini_model}`")
+        st.info("適合正式會議紀錄、決議與待辦整理；逐字稿會送至 Google Gemini API。")
+    else:
         ollama_model = st.selectbox(
             "地端模型",
             ["qwen2.5:7b", "qwen2.5:14b", "qwen2.5:3b", "llama3.1:8b"],
@@ -324,7 +338,9 @@ def build_common_args(output_dir):
         args.extend(["--model", model])
     args.extend(["--prompt-style", prompt_style])
     args.extend(["--summary-engine", summary_engine])
-    if summary_engine == "ollama":
+    if summary_engine == "gemini":
+        args.extend(["--gemini-model", gemini_model])
+    else:
         args.extend(["--ollama-model", ollama_model, "--ollama-url", ollama_url])
     args.extend(["--output", output_dir])
     if enable_gdrive:

@@ -36,6 +36,25 @@ pip install -r requirements.txt
 ./啟動Web介面.command
 ```
 
+## ASR 模型選擇與適用場景
+
+Web UI 會依「執行程式的主機」顯示真正可用的模型，而不是依瀏覽器裝置判斷。從 Mac 瀏覽 OCI 網站時，運算仍發生在 OCI。
+
+| 模型 | 適用環境 | 適用場景 | 資源取向 |
+| --- | --- | --- | --- |
+| SenseVoiceSmall | OCI ARM／一般 CPU | 中文長會議、多人說話、批次處理 | 省資源、支援 VAD／標點／CAM++ |
+| Whisper Large V3 Turbo | Apple Silicon，16GB+ | 中英混講、一般會議 | Mac M4 24GB 日常推薦 |
+| Whisper Large V3 4-bit | Apple Silicon，16GB+ | 希望降低記憶體並試用 Large V3 | 省記憶體實驗選項 |
+| Whisper Large V3 FP16 | Apple Silicon，24GB+ | 重要錄音、精度優先 | 高占用，建議先關閉大型應用程式 |
+
+Mac M4 24GB 預設使用 Turbo，以保留瀏覽器、通訊與辦公軟體的日常記憶體空間。Qwen3-ASR 尚未列入 Mac 選單，因官方執行路徑目前以 CUDA／vLLM 為主。
+
+## 摘要模型與會議紀錄規則
+
+預設摘要模型為 **Gemini 3.5 Flash**（模型 ID：`gemini-3.5-flash`）。UI 會明確顯示實際模型及資料會送往雲端 API。Ollama 僅在使用者自行提供可連線的地端服務時使用。
+
+所有摘要風格都套用共同事實約束：繁體中文、不得虛構、不得自行推定負責人或期限，並區分已決議、提案、討論中與未決問題。正式會議紀錄固定包含一頁摘要、決議、待辦、風險、未決問題及下次追蹤。
+
 ## OCI 部署
 
 OCI 使用 CPU 版本的 `Dockerfile` 與 `docker-compose.yml`；MLX 不會安裝在 Linux 映像中。
