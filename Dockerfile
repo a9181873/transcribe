@@ -15,7 +15,7 @@ COPY requirements-oci.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements-oci.txt
 
-COPY transcribe_pro.py webui.py asr_catalog.py summary_prompt_rules.py README.md ./
+COPY transcribe_pro.py webui.py asr_catalog.py summary_prompt_rules.py job_retention.py README.md ./
 COPY .streamlit/config.toml ./.streamlit/config.toml
 
 RUN useradd --create-home --uid 10001 app \

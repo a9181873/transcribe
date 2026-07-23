@@ -17,6 +17,7 @@ from asr_catalog import (
     detect_runtime_family,
     runtime_label,
 )
+from job_retention import JOB_TOKEN_RE, mark_job_active, mark_job_finished
 
 st.set_page_config(page_title="AI 語音識別轉錄系統", page_icon="🎤", layout="wide")
 
@@ -26,7 +27,6 @@ ALLOW_LOCAL_PATHS = os.getenv("MEETING_ALLOW_LOCAL_PATHS", "0") == "1"
 ALLOW_CUSTOM_OLLAMA = os.getenv("MEETING_ALLOW_CUSTOM_OLLAMA", "0") == "1"
 
 PUBLIC_JOB_ROOT = Path("./output/jobs")
-JOB_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 
 
 @st.cache_resource
@@ -429,6 +429,7 @@ def render_artifact_downloads(result_dir, stem, key_prefix):
                     file_name=filename,
                     mime=mime,
                     key=f"{key_prefix}_{index}",
+                    on_click="ignore",
                     use_container_width=True,
                 )
     zip_data = make_output_zip(result_dir)
@@ -438,6 +439,7 @@ def render_artifact_downloads(result_dir, stem, key_prefix):
         file_name=f"{stem}_會議記錄.zip",
         mime="application/zip",
         key=f"{key_prefix}_zip",
+        on_click="ignore",
         use_container_width=True,
     )
 
@@ -510,6 +512,16 @@ def render_single_result(result_dir, key_prefix):
         st.info("逐字稿已保存；會議摘要仍在處理中，稍後重新整理即可。")
 
     transcript_text = transcript_file.read_text(encoding="utf-8")
+    st.download_button(
+        label="⬇️ 直接下載逐字稿（備用）",
+        data=transcript_file.read_bytes(),
+        file_name=transcript_file.name,
+        mime="text/plain",
+        key=f"{key_prefix}_direct_transcript",
+        on_click="ignore",
+        type="primary",
+        use_container_width=True,
+    )
     with st.expander("📝 點此展開完整逐字稿", expanded=True):
         st.text_area(
             "逐字稿內容",
@@ -630,7 +642,7 @@ with tab1:
         output_dir_1 = st.text_input("輸出目錄", value="./output", key="out1")
     else:
         st.caption(
-            "公開上傳模式：每次處理都有專屬結果連結，重新整理後仍可取回。"
+            "公開上傳模式：每次處理都有專屬結果連結；完成後保留 3 天。"
         )
 
     start_single = st.button("🚀 開始轉錄 (單一檔案)", key="btn_single")
@@ -638,6 +650,7 @@ with tab1:
         final_input_path = ""
         run_output_dir = output_dir_1
         job_token = ""
+        job_dir = None
 
         if uploaded_file is not None:
             safe_name = Path(uploaded_file.name).name
@@ -647,6 +660,7 @@ with tab1:
                 job_token = secrets.token_urlsafe(18)
                 job_dir = _public_job_dir(job_token)
                 job_dir.mkdir(parents=True, exist_ok=False)
+                mark_job_active(job_dir)
                 run_output_dir = str(job_dir)
                 st.query_params["job"] = job_token
 
@@ -672,6 +686,8 @@ with tab1:
             finally:
                 if job_token and final_input_path:
                     Path(final_input_path).unlink(missing_ok=True)
+                if job_dir is not None:
+                    mark_job_finished(job_dir)
 
             if completed_result is not None:
                 st.session_state["latest_single_result"] = str(completed_result)
@@ -690,6 +706,8 @@ with tab1:
                 current_job_dir = _public_job_dir(current_token)
                 if current_job_dir is not None and current_job_dir.is_dir():
                     st.info("這次工作仍在處理中；稍後重新整理此頁即可取回結果。")
+                else:
+                    st.warning("這份結果不存在，或已超過 3 天保存期限並自動清除。")
 
 with tab2:
     if not ALLOW_LOCAL_PATHS:

@@ -9,7 +9,8 @@
   * **雲端模式**：使用 Google GenAI SDK 與可設定的 Gemini 模型。
   * **地端模式**：整合 Ollama (`Qwen 2.5 7B`)，實現完全離線、確保資料隱私的中文會議摘要。
 * **友善介面**：提供 Streamlit WebUI，包含深色/亮色模式切換、批次處理能力以及詳盡的模型資訊頁面。
-* **可下載輸出**：每次處理產生摘要、逐字稿、逐句 JSON、SRT、VTT，並可一次下載 ZIP。
+* **可下載輸出**：每次處理產生摘要、逐字稿、逐句 JSON、SRT、VTT，並可一次下載 ZIP；下載不會觸發頁面重跑。
+* **自動清理**：公開工作完成後保留 3 天，由獨立清理服務每小時移除過期工作。
 
 ## 📝 更新日誌 (Update Log)
 
@@ -103,7 +104,7 @@ docker network inspect proxy >/dev/null 2>&1 || docker network create proxy
 docker compose up -d --build
 ```
 
-將 `deploy/Caddyfile.meeting.snippet` 加入 OCI Caddyfile，並將 `meeting.dky.tw` 指向 OCI 伺服器，即可透過 HTTPS 使用。公開部署預設只允許瀏覽器上傳，並停用需要互動式憑證的 Google Drive；每次上傳會產生可在重新整理後恢復的專屬結果網址，可下載 TXT、JSON、SRT、VTT 或 ZIP。如需本機資料夾批次功能，請在環境變數設定 `MEETING_ALLOW_LOCAL_PATHS=1`。
+將 `deploy/Caddyfile.meeting.snippet` 加入 OCI Caddyfile，並將 `meeting.dky.tw` 指向 OCI 伺服器，即可透過 HTTPS 使用。公開部署預設只允許瀏覽器上傳，並停用需要互動式憑證的 Google Drive；每次上傳會產生可在重新整理後恢復的專屬結果網址，可下載 TXT、JSON、SRT、VTT 或 ZIP。結果完成後保留 72 小時，`meeting-cleanup` 服務每小時只掃描並清除 `output/jobs/<工作代碼>`，不會碰模型或本機／批次輸出。如需本機資料夾批次功能，請在環境變數設定 `MEETING_ALLOW_LOCAL_PATHS=1`。
 
 ## 🔒 安全性聲明
 本專案的 `config.ini`、Google Drive 憑證檔案 (`*.json`) 皆已加入 `.gitignore`，確保使用者的 API Key 與機密憑證絕對不會被上傳至雲端。

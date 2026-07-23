@@ -19,6 +19,24 @@ services:
     networks:
       - proxy
 
+  meeting-cleanup:
+    build: .
+    container_name: meeting-cleanup
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    command:
+      - python
+      - job_retention.py
+      - --root
+      - /app/output/jobs
+      - --retention-hours
+      - "72"
+      - --interval-seconds
+      - "3600"
+    volumes:
+      - meeting_output:/app/output
+
 networks:
   proxy:
     external: true
